@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""Developer stand-in for IINA's iina-cli on non-Mac machines.
+
+Translates `--mpv-<opt>=<val>` into mpv options and launches headless mpv, so the
+IINA bridge (mpv JSON IPC) can be tested without a Mac. Not used in production.
+
+    NITPIX_ALLOW_NON_MAC=1 and Settings ▸ IINA ▸ iina-cli path = tools/dev/fake-iina-cli
+"""
+import os
+import shutil
+import subprocess
+import sys
+
+args = ["mpv", "--vo=null", "--ao=null", "--idle=yes", "--really-quiet"]
+for a in sys.argv[1:]:
+    if a.startswith("--mpv-"):
+        args.append("--" + a[len("--mpv-"):])
+    elif a.startswith("-"):
+        continue  # IINA-only flags
+    else:
+        args.append(a)
+if not shutil.which("mpv"):
+    sys.exit("mpv not installed")
+subprocess.Popen(args, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

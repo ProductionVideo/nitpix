@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nitpix</title>
+<link rel="icon" type="image/svg+xml" href="/static/branding/favicon.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="app">
+  <aside id="rail">
+    <div class="mark" title="nitpix" aria-label="nitpix"><img class="brand-symbol" src="/static/branding/mark.svg" alt="" width="28" height="28"><img class="brand-wordmark" src="/static/branding/wordmark.svg" alt="nitpix" width="82" height="26"></div>
+    <nav id="nav">
+      <button data-view="dashboard" title="Dashboard (1)"><i class="ic ic-dash"></i><span>Dashboard</span></button>
+      <button data-view="media" title="Media (2)"><i class="ic ic-list"></i><span>Media</span></button>
+      <button data-view="review" title="Review (3)"><i class="ic ic-review"></i><span>Review</span></button>
+      <button data-view="presets" title="Presets (4)"><i class="ic ic-spec"></i><span>Presets</span></button>
+      <button data-view="reports" title="Reports (5)"><i class="ic ic-report"></i><span>Reports</span></button>
+      <button data-view="settings" title="Settings (6)"><i class="ic ic-gear"></i><span>Settings</span></button>
+    </nav>
+    <div id="rail-status"></div>
+  </aside>
+  <main id="main">
+    <header id="topbar"></header>
+    <div id="jobbar" hidden></div>
+    <section id="view"></section>
+  </main>
+</div>
+<div id="modal" hidden></div>
+<div id="toasts"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

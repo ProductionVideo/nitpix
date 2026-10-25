@@ -1,0 +1,921 @@
+"""Main window: rail navigation, the screens, scan jobs and the project lifecycle."""
+from __future__ import annotations
+
+import os
+import platform
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QIcon, QSurfaceFormat
+from PySide6.QtSvgWidgets import QSvgWidget
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+                               QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTableView, QTextEdit, QVBoxLayout,
+                               QWidget, QAbstractItemView)
+
+from .. import demo, libmpv, reports, service
+from ..probe import tool_versions
+from ..store import recent_projects
+from . import deps, theme
+from .media import AssetModel, MediaScreen, setup_columns
+from .mpvwidget import gl_format
+from .presets import PresetsScreen
+from .review import ReviewScreen, btn, chip
+from .widgets import ElideLabel, nav_icon
+
+VIEWS = ["dashboard", "media", "review", "presets", "reports", "settings"]
+VIEW_LABEL = {"dashboard": "Dashboard", "media": "Media", "review": "Review", "presets": "Presets", "reports": "Reports",
+              "settings": "Settings"}
+ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def brand_lockup(size=24):
+    """Shared outlined artwork in the start screen and project sidebar."""
+    brand_dir = Path(__file__).resolve().parent.parent / "web" / "branding"
+    widget = QWidget()
+    widget.setAccessibleName("nitpix")
+    layout = QHBoxLayout(widget)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(round(size / 4))
+    for asset, width in (("mark.svg", size), ("wordmark.svg", round(size * 2.6))):
+        logo = QSvgWidget(str(brand_dir / asset))
+        logo.renderer().setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
+        logo.setFixedSize(width, size)
+        logo.setStyleSheet("background: transparent;")
+        layout.addWidget(logo)
+    layout.addStretch()
+    widget.setFixedHeight(size)
+    return widget
+
+
+def fmt_bytes(n):
+    if not n:
+        return "0 B"
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or u == "TB":
+            return f"{n:.1f} {u}" if u != "B" else f"{n} B"
+        n /= 1024
+
+
+TEXT_WIDGETS = (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox)
+
+
+def text_focused(w=None) -> bool:
+    w = w if w is not None else QApplication.focusWidget()
+    while w is not None:  # a line edit inside a combo box, a viewport inside a text edit
+        if isinstance(w, TEXT_WIDGETS):
+            return True
+        w = w.parentWidget()
+    return False
+
+
+# ---- small screens ---------------------------------------------------------------------
+class StartScreen(QWidget):
+    def __init__(self, win: "MainWindow"):
+        super().__init__()
+        self.win = win
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(60, 60, 60, 60)
+        lay.addWidget(brand_lockup(48))
+        lay.addSpacing(20)
+        h = QLabel("Delivery QC, frame by frame.")
+        h.setProperty("h1", True)
+        lay.addWidget(h)
+        p = QLabel("Scan video, audio, still and image-sequence deliveries, check them against a delivery spec, then "
+                   "confirm every automated finding on the source media.")
+        p.setProperty("muted", True)
+        p.setWordWrap(True)
+        lay.addWidget(p)
+        row = QHBoxLayout()
+        row.addWidget(btn("Open project…", "", self.win.open_dialog, primary=True))
+        row.addWidget(btn("New project…", "", self.win.new_dialog))
+        row.addWidget(btn("Load demo delivery", "Generates a small demo delivery and scans it", self.win.load_demo))
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addSpacing(20)
+        lay.addWidget(QLabel("<b>Recent projects</b>"))
+        self.recent = QListWidget()
+        self.recent.itemActivated.connect(lambda it: self.win.open_project(it.data(Qt.ItemDataRole.UserRole)))
+        lay.addWidget(self.recent, 1)
+        self.refresh()
+
+    def refresh(self):
+        self.recent.clear()
+        for r in recent_projects():
+            it = QListWidgetItem(f"{r.get('name') or Path(r['path']).stem}    {r['path']}")
+            it.setData(Qt.ItemDataRole.UserRole, r["path"])
+            it.setFont(theme.mono(12))
+            self.recent.addItem(it)
+
+
+class AddMediaDialog(QDialog):
+    def __init__(self, win: "MainWindow", roots: list[str]):
+        super().__init__(win)
+        self.setWindowTitle("Add media")
+        self.resize(640, 360)
+        lay = QVBoxLayout(self)
+        hint = QLabel("Files or folders to scan, one per line. Folders are scanned recursively. Image sequences: add the folder "
+                      "that holds the frames, or any one frame of it; frames named like name.####.ext become one asset.")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        self.paths = QPlainTextEdit("\n".join(roots))
+        self.paths.setFont(theme.mono(12))
+        lay.addWidget(self.paths, 1)
+        row = QHBoxLayout()
+        row.addWidget(btn("Choose folder…", "Scan a delivery folder: videos, audio, stills and image sequences", self._folder))
+        row.addWidget(btn("Choose files…", "", self._files))
+        row.addWidget(btn("Choose image sequence…", "Pick any one frame; the whole sequence in that folder is added", self._sequence))
+        row.addStretch(1)
+        self.force = QCheckBox("Re-check files that haven't changed")
+        row.addWidget(self.force)
+        lay.addLayout(row)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        scan = bb.addButton("Scan", QDialogButtonBox.ButtonRole.AcceptRole)
+        scan.setProperty("primary", True)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Choose a folder to scan")
+        if d:
+            self.paths.appendPlainText(d)
+
+    def _files(self):
+        fs, _ = QFileDialog.getOpenFileNames(self, "Choose files to scan")
+        for f in fs:
+            self.paths.appendPlainText(f)
+
+    def _sequence(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Choose any one frame of the image sequence", "",
+                                           "Image frames (*.exr *.dpx *.tif *.tiff *.png *.jpg *.jpeg *.tga *.cin);;All files (*)")
+        if f:
+            self.paths.appendPlainText(f)
+
+    def roots(self) -> list[str]:
+        return [l.strip() for l in self.paths.toPlainText().splitlines() if l.strip()]
+
+
+class JobBar(QFrame):
+    def __init__(self, win: "MainWindow"):
+        super().__init__()
+        self.win = win
+        self.setObjectName("panel")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 6, 12, 6)
+        self.label = ElideLabel()
+        self.label.setStyleSheet("font-weight: 600;")
+        self.phase = ElideLabel()
+        self.phase.setProperty("muted", True)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setFixedWidth(160)
+        self.current = ElideLabel()
+        self.current.setFont(theme.mono(11))
+        self.current.setProperty("muted", True)
+        self.pause = btn("Pause", "", self._pause)
+        self.cancel = btn("Cancel", "", self._cancel, ghost=True)
+        lay.addWidget(self.label, 1)
+        lay.addWidget(self.phase, 1)
+        lay.addWidget(self.bar)
+        lay.addWidget(self.current, 2)
+        lay.addWidget(self.pause)
+        lay.addWidget(self.cancel)
+        self.hide()
+
+    def show_job(self, j: dict | None):
+        if not j or j["state"] in ("done", "error", "cancelled"):
+            self.hide()
+            return
+        self.show()
+        eta = f" · ETA {int(j['eta'] // 60)}:{int(j['eta'] % 60):02d}" if j.get("eta") else ""
+        self.label.setText(j["label"])
+        self.phase.setText(f"{j['phase']} {j['done']}/{j['total']}{eta}")
+        self.bar.setValue(int(j["progress"] * 1000))
+        self.current.setText("  ".join(f"{c['name']} {int(c.get('progress', 0) * 100)}%" for c in j["current"][:3]))
+        self.pause.setText("Resume" if j["state"] == "paused" else "Pause")
+
+    def _pause(self):
+        jobs = self.win.session.jobs
+        j = jobs.active if jobs else None
+        if j:
+            jobs.resume() if j.state == "paused" else jobs.pause()
+
+    def _cancel(self):
+        if self.win.session.jobs:
+            self.win.session.jobs.cancel()
+
+
+class DashboardScreen(QWidget):
+    def __init__(self, win: "MainWindow"):
+        super().__init__()
+        self.win = win
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(12)
+        self.title = QLabel()
+        self.title.setProperty("h1", True)
+        self.title.setWordWrap(True)
+        self.sub = ElideLabel()
+        self.sub.setProperty("muted", True)
+        lay.addWidget(self.title)
+        lay.addWidget(self.sub)
+        self.kpis = QGridLayout()
+        lay.addLayout(self.kpis)
+        lay.addWidget(QLabel("<b>Needs attention</b>"))
+        self.model = AssetModel()
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        setup_columns(self.table)
+        self.table.doubleClicked.connect(lambda ix: self.win.show_asset(self.model.rows[ix.row()]["id"]))
+        lay.addWidget(self.table, 1)
+        self.issues = QLabel()
+        self.issues.setWordWrap(True)
+        self.issues.setProperty("muted", True)
+        lay.addWidget(self.issues)
+
+    def refresh(self):
+        p = self.win.session.project
+        d = service.dashboard(p)
+        s = p.settings
+        self.title.setText(s.get("project_name") or "Untitled delivery")
+        pr = self.win.session.preset()
+        self.sub.setText(f"{s.get('client') or 'No client'} · Preset: {pr.get('name') or 'none'}")
+        while self.kpis.count():
+            w = self.kpis.takeAt(0).widget()
+            if w:
+                w.hide()
+                w.setParent(None)  # gone now, not on the next event-loop pass
+                w.deleteLater()
+        rv = d["by_review"]
+        signed = sum(rv.get(k, 0) for k in ("approved", "approved_notes", "rejected"))
+        cards = [("Assets", f"{d['assets']['n'] or 0}", fmt_bytes(d["assets"]["bytes"] or 0)),
+                 ("Fail", str(d["by_result"].get("fail", 0)), "assets with failed checks"),
+                 ("Warning", str(d["by_result"].get("warning", 0)), "assets to look at"),
+                 ("Pass", str(d["by_result"].get("pass", 0)), "assets clean"),
+                 ("Unconfirmed detections", str(d["open_detections"]), "need a reviewer decision"),
+                 ("Signed off", f"{signed} / {d['assets']['n'] or 0}", f"{rv.get('approved', 0)} approved · {rv.get('approved_notes', 0)} w/ notes · {rv.get('rejected', 0)} rejected")]
+        for i, (lab, val, sub) in enumerate(cards):
+            card = QFrame()
+            card.setObjectName("panel")
+            cl = QVBoxLayout(card)
+            l1 = QLabel(lab.upper())
+            l1.setStyleSheet(f"color: {theme.T['muted']}; font-size: 11px; letter-spacing: .06em;")
+            l2 = QLabel(val)
+            l2.setStyleSheet("font-size: 24px; font-weight: 600;")
+            l3 = ElideLabel(sub)
+            l3.setProperty("faint", True)
+            cl.addWidget(l1)
+            cl.addWidget(l2)
+            cl.addWidget(l3)
+            self.kpis.addWidget(card, i // 3, i % 3)
+        self.model.set_rows(d["needs_attention"])
+        top = ", ".join(f"{t['check_key']} ({t['n']} on {t['assets']} assets)" for t in d["top_issues"][:6])
+        self.issues.setText(("Most common problems: " + top) if top else "No problems recorded yet.")
+
+
+class ReportsScreen(QWidget):
+    def __init__(self, win: "MainWindow"):
+        super().__init__()
+        self.win = win
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(12)
+        h = QLabel("Reports")
+        h.setProperty("h1", True)
+        lay.addWidget(h)
+        p = QLabel("Reports include file paths, metadata, every check with its reason, automated detections with reviewer "
+                   "decisions, reviewer notes and sign-off status. Files are written to the project's exports folder.")
+        p.setWordWrap(True)
+        p.setProperty("muted", True)
+        lay.addWidget(p)
+        row = QHBoxLayout()
+        self.scope = QComboBox()
+        self.scope.addItem("All assets", "all")
+        self.scope.addItem("Assets matching the Media filter", "filter")
+        self.scope.addItem("Selected assets", "selection")
+        row.addWidget(self.scope)
+        for fmt in ("csv", "json", "pdf"):
+            row.addWidget(btn(f"Export {fmt.upper()}", "", lambda _, fmt=fmt: self._export(fmt)))
+        row.addWidget(btn("Open exports folder", "", self._open_folder, ghost=True))
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.files = QListWidget()
+        self.files.setFont(theme.mono(12))
+        self.files.itemActivated.connect(lambda it: self._reveal(it.text()))
+        lay.addWidget(self.files, 1)
+        so = QFrame()
+        so.setObjectName("panel")
+        form = QFormLayout(so)
+        self.so_status = QComboBox()
+        for k, l in (("approved", "Approved for delivery"), ("approved_notes", "Approved with notes"), ("rejected", "Rejected — redeliver")):
+            self.so_status.addItem(l, k)
+        self.so_by = QLineEdit()
+        self.so_note = QLineEdit()
+        form.addRow(QLabel("<b>Batch sign-off</b>"))
+        form.addRow("Decision", self.so_status)
+        form.addRow("Signed by", self.so_by)
+        form.addRow("Note", self.so_note)
+        brow = QHBoxLayout()
+        brow.addWidget(btn("Record sign-off", "", self._signoff, primary=True))
+        brow.addWidget(btn("Clear", "", lambda: self._signoff(clear=True), ghost=True))
+        self.so_state = QLabel()
+        self.so_state.setProperty("muted", True)
+        brow.addWidget(self.so_state, 1)
+        form.addRow(brow)
+        lay.addWidget(so)
+
+    def refresh(self):
+        p = self.win.session.project
+        self.files.clear()
+        exp = p.safe_path("exports")
+        for f in sorted(exp.glob("*"), key=lambda f: f.stat().st_mtime, reverse=True)[:40]:
+            self.files.addItem(f.name)
+        so = p.get_meta("signoff")
+        self.so_by.setText((so or {}).get("by") or p.settings.get("reviewer") or "")
+        self.so_state.setText(f"Signed off: {so['status']} by {so['by']} · {time.strftime('%d %b %Y %H:%M', time.localtime(so['at']))}" if so else "Not signed off yet.")
+
+    def _ids(self):
+        s = self.scope.currentData()
+        if s == "filter":
+            return self.win.media.visible_ids()
+        if s == "selection":
+            return self.win.media.selected_ids()
+        return None
+
+    def _export(self, fmt):
+        p = self.win.session.project
+        try:
+            fn = {"csv": reports.export_csv, "json": reports.export_json, "pdf": reports.export_pdf}[fmt]
+            path = fn(p, self._ids())
+            self.win.toast(f"Wrote {Path(path).name}")
+            self.refresh()
+        except Exception as e:
+            self.win.toast(str(e), True)
+
+    def _open_folder(self):
+        self._reveal(None)
+
+    def _reveal(self, name):
+        p = self.win.session.project.safe_path("exports", name) if name else self.win.session.project.safe_path("exports")
+        if platform.system() == "Darwin":
+            subprocess.run(["open", "-R" if name else "", str(p)] if name else ["open", str(p)])
+        elif platform.system() == "Windows":
+            os.startfile(str(p))  # noqa: S606
+        else:
+            subprocess.run(["xdg-open", str(p.parent if name else p)])
+
+    def _signoff(self, clear=False):
+        p = self.win.session.project
+        service.signoff(p, None if clear else self.so_status.currentData(), self.so_by.text().strip(), self.so_note.text().strip())
+        self.refresh()
+        self.win.toast("Sign-off cleared" if clear else "Sign-off recorded")
+
+
+class SettingsScreen(QWidget):
+    def __init__(self, win: "MainWindow"):
+        super().__init__()
+        self.win = win
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 12, 16, 12)
+        h = QLabel("Settings")
+        h.setProperty("h1", True)
+        outer.addWidget(h)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        box = QWidget()
+        form = QFormLayout(box)
+        self.name = QLineEdit()
+        self.client = QLineEdit()
+        self.reviewer = QLineEdit()
+        self.reviewer.setToolTip("Stamped on decisions, notes and sign-offs")
+        self.preset = QComboBox()
+        self.workers = QSpinBox()
+        self.workers.setRange(1, 8)
+        self.content = QCheckBox("Black / freeze / flash / silence / clipping detection")
+        self.loudness = QCheckBox("Loudness (EBU R128)")
+        self.max_secs = QSpinBox()
+        self.max_secs.setRange(0, 36000)
+        self.max_secs.setSpecialValueText("whole file")
+        self.max_secs.setSuffix(" s")
+        self.iina_cli = QLineEdit()
+        self.iina_mode = QComboBox()
+        self.iina_mode.addItem("Per session (default)", "per_session")
+        self.iina_mode.addItem("Fixed socket", "fixed")
+        self.iina_sock = QLineEdit()
+        form.addRow(QLabel("<b>Project</b>"))
+        form.addRow("Project name", self.name)
+        form.addRow("Client", self.client)
+        form.addRow("Reviewer (your name)", self.reviewer)
+        form.addRow("Delivery preset", self.preset)
+        form.addRow(QLabel("<b>Analysis</b>"))
+        form.addRow("Parallel workers", self.workers)
+        form.addRow("", self.content)
+        form.addRow("", self.loudness)
+        form.addRow("Decode at most", self.max_secs)
+        form.addRow(QLabel("<b>IINA (optional, macOS)</b>"))
+        form.addRow("iina-cli path", self.iina_cli)
+        form.addRow("Socket mode", self.iina_mode)
+        form.addRow("Fixed socket path", self.iina_sock)
+        self.tools = QLabel()
+        self.tools.setProperty("muted", True)
+        self.tools.setWordWrap(True)
+        form.addRow(QLabel("<b>Tools</b>"))
+        form.addRow(self.tools)
+        self.fix_btn = btn("Install missing components…", "", lambda: (deps.check(self), self.refresh(), self.win.refresh_rail()))
+        form.addRow("", self.fix_btn)
+        row = QHBoxLayout()
+        row.addWidget(btn("Save settings", "", self.save, primary=True))
+        row.addStretch(1)
+        form.addRow(row)
+        scroll.setWidget(box)
+        outer.addWidget(scroll, 1)
+
+    def refresh(self):
+        p = self.win.session.project
+        s = p.settings
+        self.name.setText(s.get("project_name") or "")
+        self.client.setText(s.get("client") or "")
+        self.reviewer.setText(s.get("reviewer") or "")
+        self.preset.clear()
+        for pr in service.presets(p)["presets"]:
+            self.preset.addItem(pr["name"], pr["id"])
+        self.preset.setCurrentIndex(max(0, self.preset.findData(s.get("preset_id"))))
+        an = s["analysis"]
+        self.workers.setValue(int(an.get("workers", 2)))
+        self.content.setChecked(bool(an.get("content_checks", True)))
+        self.loudness.setChecked(bool(an.get("loudness", True)))
+        self.max_secs.setValue(int(an.get("max_analysis_seconds") or 0))
+        ii = s["iina"]
+        self.iina_cli.setText(ii.get("cli_path") or "")
+        self.iina_mode.setCurrentIndex(max(0, self.iina_mode.findData(ii.get("socket_mode"))))
+        self.iina_sock.setText(ii.get("fixed_socket") or "")
+        tv = tool_versions()
+        mpv = f"libmpv {libmpv.version()} at {libmpv.LIBMPV}" if libmpv.available() else f"libmpv not found ({libmpv.MPV_ERROR}); the frame viewer is used instead"
+        self.tools.setText("\n".join([f"{k}: {v['version'] or 'not found'}" for k, v in tv.items()] + [mpv]))
+        self.fix_btn.setVisible(bool(deps.missing()))
+
+    def save(self):
+        p = self.win.session.project
+        patch = {"project_name": self.name.text().strip() or "Untitled delivery", "client": self.client.text().strip(),
+                 "reviewer": self.reviewer.text().strip(), "preset_id": self.preset.currentData(),
+                 "analysis": {"workers": self.workers.value(), "content_checks": self.content.isChecked(),
+                              "loudness": self.loudness.isChecked(), "max_analysis_seconds": self.max_secs.value()},
+                 "iina": {"cli_path": self.iina_cli.text().strip(), "socket_mode": self.iina_mode.currentData(),
+                          "fixed_socket": self.iina_sock.text().strip()}}
+        before = p.settings.get("preset_id")
+        service.update_settings(p, patch)
+        if patch["preset_id"] != before:
+            ids = [r["id"] for r in p.q("SELECT id FROM assets")]
+            if ids:
+                self.win.session.jobs.recheck(ids, reanalyse=False)
+        self.win.toast("Settings saved")
+        self.win.refresh_rail()
+
+
+# ---- main window ---------------------------------------------------------------------------
+class MainWindow(QMainWindow):
+    demo_done = Signal(str)  # from the generator thread; "" on success
+
+    def __init__(self, session: service.Session):
+        super().__init__()
+        self.demo_done.connect(self._demo_ready)
+        self.session = session
+        self.setWindowTitle("nitpix")
+        self._place_window()  # the minimum size comes from the layouts (about 1040 × 640)
+        self.last_job_state = None
+        self._list_at = 0.0
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        # rail: icons + labels, collapsible to icons only (remembered)
+        rail = QFrame()
+        rail.setObjectName("rail")
+        rl = QVBoxLayout(rail)
+        rl.setContentsMargins(8, 10, 8, 10)
+        rl.setSpacing(2)
+        top = QHBoxLayout()
+        top.setSpacing(0)
+        self.brand = brand_lockup()
+        top.addWidget(self.brand, 1)
+        self.rail_toggle = QPushButton()
+        self.rail_toggle.setProperty("nav", True)
+        self.rail_toggle.setFixedSize(30, 30)
+        self.rail_toggle.setToolTip("Collapse / expand the sidebar")
+        self.rail_toggle.clicked.connect(lambda: self.set_rail_collapsed(not self.rail_collapsed))
+        top.addWidget(self.rail_toggle)
+        rl.addLayout(top)
+        self.proj_lab = QLabel()
+        self.proj_lab.setWordWrap(True)
+        self.proj_lab.setProperty("muted", True)
+        self.proj_lab.setContentsMargins(2, 0, 0, 8)
+        rl.addWidget(self.proj_lab)
+        self.nav = {}
+        ink, ink_on = theme.T["ink2"], theme.T["accent_ink"]
+        for i, v in enumerate(VIEWS, 1):
+            b = QPushButton(VIEW_LABEL[v])
+            b.setIcon(nav_icon(v, ink, ink_on))
+            b.setIconSize(QSize(18, 18))
+            b.setProperty("nav", True)
+            b.setCheckable(True)
+            b.setToolTip(f"{VIEW_LABEL[v]} ({i})")
+            b.clicked.connect(lambda _, v=v: self.show_view(v))
+            rl.addWidget(b)
+            self.nav[v] = b
+        rl.addStretch(1)
+        self.tools_lab = QLabel()
+        self.tools_lab.setProperty("faint", True)
+        self.tools_lab.setContentsMargins(2, 0, 0, 4)
+        rl.addWidget(self.tools_lab)
+        self.close_btn = QPushButton("Close project")
+        self.close_btn.setIcon(nav_icon("close", theme.T["muted"], ink_on))
+        self.close_btn.setIconSize(QSize(18, 18))
+        self.close_btn.setProperty("nav", True)
+        self.close_btn.setToolTip("Close project")
+        self.close_btn.clicked.connect(self.close_project)
+        rl.addWidget(self.close_btn)
+        self.help_lab = QLabel("? shortcuts")
+        self.help_lab.setFont(theme.mono(10))
+        self.help_lab.setProperty("faint", True)
+        self.help_lab.setContentsMargins(4, 2, 0, 0)
+        rl.addWidget(self.help_lab)
+        root.addWidget(rail)
+        self.rail = rail
+        self.rail_collapsed = False
+        self.set_rail_collapsed(QSettings("nitpix", "nitpix").value("rail/collapsed", False, type=bool))
+        # centre
+        centre = QVBoxLayout()
+        centre.setContentsMargins(0, 0, 0, 0)
+        centre.setSpacing(0)
+        self.stack = QStackedWidget()
+        self.start = StartScreen(self)
+        self.dashboard = DashboardScreen(self)
+        self.media = MediaScreen()
+        self.review = ReviewScreen(session)
+        self.presets = PresetsScreen(self)
+        self.reports_screen = ReportsScreen(self)
+        self.settings_screen = SettingsScreen(self)
+        self.screens = {"start": self.start, "dashboard": self.dashboard, "media": self.media, "review": self.review,
+                        "presets": self.presets, "reports": self.reports_screen, "settings": self.settings_screen}
+        for s in self.screens.values():
+            self.stack.addWidget(s)
+        centre.addWidget(self.stack, 1)
+        self.jobbar = JobBar(self)
+        centre.addWidget(self.jobbar)
+        root.addLayout(centre, 1)
+        # wiring
+        self.media.open_asset.connect(self.show_asset)
+        self.media.add_media.connect(self.add_media)
+        self.media.recheck.connect(self._recheck)
+        self.media.remove.connect(self._remove)
+        self.media.bulk_review.connect(self._bulk_review)
+        self.review.navigate.connect(self.show_asset)
+        self.review.asset_changed.connect(lambda a: self._refresh_list(force=True))
+        self.review.status.connect(self.toast)
+        # toast
+        self.toast_lab = QLabel(self)
+        self.toast_lab.hide()
+        self.toast_timer = QTimer(self, singleShot=True)
+        self.toast_timer.timeout.connect(self.toast_lab.hide)
+        # job polling
+        self.poll = QTimer(self, interval=500)
+        self.poll.timeout.connect(self._poll)
+        self.poll.start()
+        self.show_view("start")
+        self.refresh_rail()
+        QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        """Transport keys reach the player from anywhere in the review screen: a button that was
+        just clicked, the tabs, the metadata tree. Text fields and dialogs keep their keys."""
+        if ev.type() == QEvent.Type.KeyPress and getattr(self, "current_view", None) == "review" and QApplication.activeModalWidget() is None:
+            fw = QApplication.focusWidget() or (obj if isinstance(obj, QWidget) else None)
+            if not text_focused(fw) and (fw is None or fw.window() is self) and self.review.handle_key(ev):
+                return True
+        return super().eventFilter(obj, ev)
+
+    # ---- project lifecycle -------------------------------------------------------
+    def open_project(self, path: str, name: str | None = None):
+        try:
+            self.session.open(path, name)
+        except Exception as e:
+            self.toast(str(e), True)
+            return
+        self.review.asset = None
+        self.refresh_rail()
+        self.show_view("dashboard")
+
+    def open_dialog(self):
+        d = QFileDialog.getExistingDirectory(self, "Open a project folder (.nitpix)")
+        if d:
+            self.open_project(d)
+
+    def new_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("New project")
+        form = QFormLayout(dlg)
+        name = QLineEdit("Untitled delivery")
+        folder = QLineEdit(os.path.expanduser("~/nitpix Projects"))
+        pick = btn("Choose…", "", lambda: folder.setText(QFileDialog.getExistingDirectory(dlg, "Where to keep the project") or folder.text()))
+        row = QHBoxLayout()
+        row.addWidget(folder, 1)
+        row.addWidget(pick)
+        form.addRow("Project name", name)
+        form.addRow("Save in", row)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+        if dlg.exec() == QDialog.DialogCode.Accepted and name.text().strip():
+            slug = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name.text().strip()).strip().replace(" ", "_")
+            self.open_project(os.path.join(folder.text().strip(), slug + ".nitpix"), name.text().strip())
+            self.add_media()
+
+    def load_demo(self):
+        loc = demo.locations()
+        if loc["delivery"].exists():
+            return self._demo_ready(None)
+        self.toast("Generating the demo delivery with ffmpeg (30–60 s)…")
+        self.start.setEnabled(False)
+
+        def work():
+            try:
+                demo.generate(loc["delivery"], log=lambda *_: None)
+                self.demo_done.emit("")
+            except Exception as e:
+                self.demo_done.emit(str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _demo_ready(self, err):
+        self.start.setEnabled(True)
+        if err:
+            return self.toast("Demo generation failed: " + err[-300:], True)
+        loc = demo.locations()
+        self.open_project(str(loc["project"]), demo.PROJECT_NAME)
+        if self.session.project:
+            self.session.project.update_settings({"client": "Demo client", "preset_id": "lhs_hd_prores_25"})
+            self.session.jobs.scan_roots([str(loc["delivery"])])
+
+    def close_project(self):
+        try:
+            self.review.player.unload()
+            self.review.asset = None
+            self.session.close()
+        except Exception as e:
+            self.toast(str(e), True)
+            return
+        self.start.refresh()
+        self.show_view("start")
+        self.refresh_rail()
+
+    # ---- views ---------------------------------------------------------------------
+    def show_view(self, v: str):
+        if v != "start" and not self.session.project:
+            v = "start"
+        if v == "review" and not self.review.asset:
+            ids = self.media.visible_ids() or [r["id"] for r in service.list_assets(self.session.project)]
+            if not ids:
+                self.toast("No assets yet. Add media first.", True)
+                v = "media"
+            else:
+                return self.show_asset(ids[0])
+        self.stack.setCurrentWidget(self.screens[v])
+        for k, b in self.nav.items():
+            b.setChecked(k == v)
+        self.rail.setVisible(v != "start")
+        self.refresh_rail()
+        if v == "dashboard":
+            self.dashboard.refresh()
+        elif v == "media":
+            self._refresh_list(force=True)
+            self.media.table.setFocus()
+        elif v == "presets":
+            self.presets.refresh()
+        elif v == "reports":
+            self.reports_screen.refresh()
+        elif v == "settings":
+            self.settings_screen.refresh()
+        self.current_view = v
+        self._title()
+
+    def _title(self, asset_name: str | None = None):
+        p = self.session.project
+        bits = [b for b in (asset_name, p.settings.get("project_name") if p else None, "nitpix") if b]
+        self.setWindowTitle(" — ".join(bits))
+
+    def _place_window(self):
+        """Fit the window to this screen; restore the last size and position when it still fits."""
+        screen = self.screen() or QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+        st = QSettings("nitpix", "nitpix")
+        geo = st.value("window/geometry")
+        if geo is not None and self.restoreGeometry(geo) and (avail is None or avail.contains(self.frameGeometry().center())):
+            if avail is None or (self.width() <= avail.width() and self.height() <= avail.height()):
+                return
+        if avail is None:
+            return self.resize(1280, 800)
+        w, h = min(1500, int(avail.width() * 0.92)), min(920, int(avail.height() * 0.9))
+        self.resize(w, h)
+        self.move(avail.x() + (avail.width() - w) // 2, avail.y() + (avail.height() - h) // 2)
+
+    def show_asset(self, aid: int):
+        self._refresh_list(force=True)
+        self.review.set_order(self.media.visible_ids() or [r["id"] for r in self.media.model.rows])
+        self.stack.setCurrentWidget(self.review)  # shown first, so the player has its GL context when it loads
+        self.review.load_asset(aid)
+        for k, b in self.nav.items():
+            b.setChecked(k == "review")
+        self.current_view = "review"
+        self._title(self.review.asset["name"] if self.review.asset else None)
+        self.review.setFocus()
+
+    def set_rail_collapsed(self, collapsed: bool):
+        """Icons only (52 px) or icons with labels (168 px)."""
+        self.rail_collapsed = bool(collapsed)
+        c = self.rail_collapsed
+        self.rail.setFixedWidth(52 if c else 168)
+        self.brand.setVisible(not c)
+        self.help_lab.setVisible(not c)
+        self.rail_toggle.setIcon(nav_icon("expand" if c else "collapse", theme.T["muted"], theme.T["accent_ink"]))
+        self.rail_toggle.setIconSize(QSize(18, 18))
+        for v, b in self.nav.items():
+            b.setText("" if c else VIEW_LABEL[v])
+            b.setProperty("iconOnly", c)
+            b.style().unpolish(b)
+            b.style().polish(b)
+        self.close_btn.setText("" if c else "Close project")
+        self.close_btn.setProperty("iconOnly", c)
+        self.close_btn.style().unpolish(self.close_btn)
+        self.close_btn.style().polish(self.close_btn)
+        QSettings("nitpix", "nitpix").setValue("rail/collapsed", c)
+        self.refresh_rail()
+
+    def refresh_rail(self):
+        p = self.session.project
+        c = self.rail_collapsed
+        if p and not c:
+            pr = self.session.preset()
+            self.proj_lab.setText(f"<b>{p.settings.get('project_name')}</b><br><span style='font-size:11px'>Preset: {pr.get('name') or 'none'}</span>")
+        else:
+            self.proj_lab.setText("")
+        self.proj_lab.setVisible(bool(p) and not c)
+        tv = tool_versions()
+        state = [("FFmpeg", tv["ffmpeg"]["available"]), ("libmpv", libmpv.available())]
+        if self.session.iina:
+            state.append(("IINA", self.session.iina.environment()["available"]))
+        self.tools_lab.setText("\n".join(f"{'●' if ok else '○'} {n} {'ready' if ok else 'missing'}" for n, ok in state) if not c
+                               else "".join("●" if ok else "○" for _, ok in state))
+        self.tools_lab.setToolTip("\n".join(f"{n}: {'ready' if ok else 'missing'}" for n, ok in state))
+        self.tools_lab.setWordWrap(not c)
+        self.tools_lab.setAlignment(Qt.AlignmentFlag.AlignCenter if c else Qt.AlignmentFlag.AlignLeft)
+
+    # ---- media actions ------------------------------------------------------------
+    def _refresh_list(self, force=False):
+        if not self.session.project:
+            return
+        if not force and time.time() - self._list_at < 2.0:
+            return
+        self._list_at = time.time()
+        rows = service.list_assets(self.session.project)
+        q = self.media.search.text().strip()
+        hits = service.list_assets(self.session.project, check=q[6:]) if q.startswith("check:") else None
+        self.media.set_rows(rows, hits)
+
+    def add_media(self):
+        p = self.session.project
+        roots = [r["path"] for r in p.q("SELECT path FROM roots")]
+        dlg = AddMediaDialog(self, roots)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            if not dlg.roots():
+                return self.toast("Add at least one file or folder path", True)
+            try:
+                self.session.jobs.scan_roots(dlg.roots(), force=dlg.force.isChecked())
+                self.show_view("media")
+            except Exception as e:
+                self.toast(str(e), True)
+
+    def _recheck(self, ids):
+        self.session.jobs.recheck(ids, reanalyse=True)
+        self.toast(f"Re-checking {len(ids)} asset(s)")
+
+    def _remove(self, ids):
+        if QMessageBox.question(self, "Remove", f"Remove {len(ids)} asset(s) from the project? Files on disk are untouched.") == QMessageBox.StandardButton.Yes:
+            service.remove_assets(self.session.project, ids)
+            self._refresh_list(force=True)
+
+    def _bulk_review(self, ids, status):
+        service.bulk_review(self.session.project, ids, status)
+        self._refresh_list(force=True)
+        self.toast(f"{len(ids)} asset(s): {theme.REVIEW_LABEL[status]}")
+
+    # ---- job polling --------------------------------------------------------------
+    def _poll(self):
+        jobs = self.session.jobs
+        if not jobs:
+            self.jobbar.hide()
+            return
+        j = jobs.latest()
+        d = j.as_dict() if j else None
+        self.jobbar.show_job(d)
+        state = d["state"] if d else None
+        if state in ("running", "paused"):
+            if self.current_view == "media":
+                self._refresh_list()
+        if state != self.last_job_state and self.last_job_state in ("running", "paused", "cancelling"):
+            self._refresh_list(force=True)
+            if self.current_view == "dashboard":
+                self.dashboard.refresh()
+            elif self.current_view == "review" and self.review.asset:
+                self.review.refresh()
+            if d and d.get("summary"):
+                s = d["summary"]
+                self.toast(f"Scan {state}: {s.get('media_files', 0)} files, {s.get('sequences', 0)} sequences, {d.get('failed', 0)} errors")
+        self.last_job_state = state
+
+    # ---- toast + keys -------------------------------------------------------------------
+    def toast(self, text: str, error: bool = False):
+        self.toast_lab.setText(text)
+        self.toast_lab.setStyleSheet(f"background: {theme.T['fail_bg' if error else 'panel2']}; color: {theme.T['fail' if error else 'ink']}; "
+                                     f"border: 1px solid {theme.T['fail' if error else 'line2']}; border-radius: 6px; padding: 8px 14px;")
+        self.toast_lab.adjustSize()
+        self.toast_lab.move((self.width() - self.toast_lab.width()) // 2, self.height() - self.toast_lab.height() - 24)
+        self.toast_lab.show()
+        self.toast_lab.raise_()
+        self.toast_timer.start(5000 if error else 2500)
+
+    def keyPressEvent(self, ev):
+        if text_focused():
+            return super().keyPressEvent(ev)
+        t = ev.text()
+        if self.current_view == "review" and self.review.handle_key(ev):
+            return
+        if t == "?":
+            return self.show_help()
+        if self.current_view == "review" and ev.key() == Qt.Key.Key_Escape:
+            return self.show_view("media")
+        if t.isdigit() and 1 <= int(t) <= len(VIEWS) and self.session.project:
+            return self.show_view(VIEWS[int(t) - 1])
+        super().keyPressEvent(ev)
+
+    def show_help(self):
+        rows = [("1–6", "Switch view"), ("/", "Search media"), ("↑ ↓", "Move in list"), ("Enter", "Open asset"), ("?", "This help"),
+                ("← →", "Step one frame"), ("⇧← ⇧→", "Step one second"), ("Space", "Play / pause"), ("Home End", "First / last frame"),
+                ("e", "Open in IINA here"), ("g", "Go to timecode / frame"), ("i o", "Set in / out"), ("b", "Bookmark"), ("n", "Add note"),
+                ("[ ]", "Previous / next finding"), ("j k", "Focus next / previous finding"), ("1 2 3 4", "Pass / Issue / Warning / N/A (review)"),
+                ("0", "Clear decision"), (", .", "Previous / next asset"), ("a r", "Approve / reject asset"), ("Esc", "Back to media list")]
+        html = "<table cellpadding=4>" + "".join(f"<tr><td style='font-family:IBM Plex Mono;color:{theme.T['muted']}'>{k}</td><td>{v}</td></tr>" for k, v in rows) + "</table>"
+        QMessageBox.information(self, "Keyboard shortcuts", html)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if self.toast_lab.isVisible():
+            self.toast_lab.move((self.width() - self.toast_lab.width()) // 2, self.height() - self.toast_lab.height() - 24)
+
+    def closeEvent(self, ev):
+        jobs = self.session.jobs
+        if jobs and jobs.active:
+            if QMessageBox.question(self, "Quit", "A scan is running. Cancel it and quit?") != QMessageBox.StandardButton.Yes:
+                return ev.ignore()
+            jobs.cancel()
+            time.sleep(0.3)
+        self.poll.stop()
+        QSettings("nitpix", "nitpix").setValue("window/geometry", self.saveGeometry())
+        self.review.shutdown()
+        try:
+            self.session._close_locked()
+        except Exception:
+            pass
+        super().closeEvent(ev)
+
+
+def run(project: str | None = None) -> int:
+    QSurfaceFormat.setDefaultFormat(gl_format())
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setApplicationName("nitpix")
+    app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "web" / "branding" / "app-icon.png")))
+    theme.load_fonts()
+    app.setStyleSheet(theme.STYLESHEET)
+    win = MainWindow(service.Session())
+    win.show()
+    if not os.environ.get("NITPIX_SCREENSHOT") and not os.environ.get("NITPIX_NO_DEPS_CHECK"):
+        QTimer.singleShot(0, lambda: (deps.check(win), win.refresh_rail()))
+    if project:
+        win.open_project(project)
+    shot = os.environ.get("NITPIX_SCREENSHOT")
+    if shot:  # verification of packaged builds: grab the window after a few seconds and quit
+        aid = os.environ.get("NITPIX_SCREENSHOT_ASSET")
+        if aid and win.session.project:
+            QTimer.singleShot(1500, lambda: win.show_asset(int(aid)))
+        QTimer.singleShot(int(os.environ.get("NITPIX_SCREENSHOT_DELAY", "7000")), lambda: (win.grab().save(shot), app.quit()))
+    return app.exec()
