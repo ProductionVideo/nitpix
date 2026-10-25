@@ -9,8 +9,8 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QSurfaceFormat
+from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon, QSurfaceFormat
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
                                QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTableView, QTextEdit, QVBoxLayout,
                                QWidget, QAbstractItemView)
 
-from .. import demo, libmpv, reports, service
+from .. import __version__, demo, libmpv, reports, service, updates
 from ..probe import tool_versions
 from ..store import recent_projects
 from . import deps, theme
@@ -434,6 +434,16 @@ class SettingsScreen(QWidget):
         form.addRow(self.tools)
         self.fix_btn = btn("Install missing components…", "", lambda: (deps.check(self), self.refresh(), self.win.refresh_rail()))
         form.addRow("", self.fix_btn)
+        form.addRow(QLabel("<b>Updates</b>"))
+        urow = QHBoxLayout()
+        self.version_lab = QLabel(f"nitpix {__version__}")
+        urow.addWidget(self.version_lab)
+        urow.addWidget(btn("Check for updates", "Asks GitHub for the latest release", lambda: self.win.check_updates(manual=True)))
+        urow.addStretch(1)
+        form.addRow(urow)
+        self.auto_updates = QCheckBox("Check for updates when nitpix starts (at most once a day)")
+        self.auto_updates.toggled.connect(lambda on: QSettings("nitpix", "nitpix").setValue("updates/auto", on))
+        form.addRow("", self.auto_updates)
         row = QHBoxLayout()
         row.addWidget(btn("Save settings", "", self.save, primary=True))
         row.addStretch(1)
@@ -464,6 +474,9 @@ class SettingsScreen(QWidget):
         mpv = f"libmpv {libmpv.version()} at {libmpv.LIBMPV}" if libmpv.available() else f"libmpv not found ({libmpv.MPV_ERROR}); the frame viewer is used instead"
         self.tools.setText("\n".join([f"{k}: {v['version'] or 'not found'}" for k, v in tv.items()] + [mpv]))
         self.fix_btn.setVisible(bool(deps.missing()))
+        self.auto_updates.blockSignals(True)
+        self.auto_updates.setChecked(QSettings("nitpix", "nitpix").value("updates/auto", True, type=bool))
+        self.auto_updates.blockSignals(False)
 
     def save(self):
         p = self.win.session.project
@@ -486,10 +499,18 @@ class SettingsScreen(QWidget):
 # ---- main window ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
     demo_done = Signal(str)  # from the generator thread; "" on success
+    update_result = Signal(dict, bool)  # from the update-check thread: result, manual
 
     def __init__(self, session: service.Session):
         super().__init__()
         self.demo_done.connect(self._demo_ready)
+        self.update_result.connect(self._update_ready)
+        self._updating = False
+        helpm = self.menuBar().addMenu("Help")
+        act = helpm.addAction("Check for Updates…", lambda: self.check_updates(manual=True))
+        act.setMenuRole(act.MenuRole.ApplicationSpecificRole)  # macOS shows it in the nitpix menu
+        helpm.addAction("Keyboard Shortcuts", self.show_help)
+        helpm.addAction("nitpix on GitHub", lambda: QDesktopServices.openUrl(QUrl(updates.RELEASES.rsplit("/releases", 1)[0])))
         self.session = session
         self.setWindowTitle("nitpix")
         self._place_window()  # the minimum size comes from the layouts (about 1040 × 640)
@@ -869,6 +890,54 @@ class MainWindow(QMainWindow):
             return self.show_view(VIEWS[int(t) - 1])
         super().keyPressEvent(ev)
 
+    # ---- updates ---------------------------------------------------------------------
+    def check_updates(self, manual: bool = False):
+        """Ask GitHub for the latest release in a thread; the answer comes back as update_result."""
+        st = QSettings("nitpix", "nitpix")
+        if not manual:
+            if not st.value("updates/auto", True, type=bool):
+                return
+            if time.time() - float(st.value("updates/last", 0) or 0) < 24 * 3600:
+                return
+        if self._updating:
+            return
+        self._updating = True
+        if manual:
+            self.toast("Checking for updates…")
+        threading.Thread(target=lambda: self.update_result.emit(updates.check(), manual), daemon=True).start()
+
+    def _update_ready(self, r: dict, manual: bool):
+        self._updating = False
+        st = QSettings("nitpix", "nitpix")
+        if r.get("error"):
+            if manual:
+                self.toast(r["error"], True)
+            return  # a quiet start-up check stays quiet when offline
+        st.setValue("updates/last", time.time())
+        if not r.get("newer"):
+            if manual:
+                self.toast(f"nitpix {r['current']} is up to date")
+            return
+        if not manual and st.value("updates/skip") == r["latest"]:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Update available")
+        box.setText(f"<b>nitpix {r['latest']}</b> is available. You have {r['current']}.")
+        notes = r.get("notes") or ""
+        box.setInformativeText((notes[:600] + ("…" if len(notes) > 600 else "")) if notes else "See the release page for what changed.")
+        get = box.addButton("Download", QMessageBox.ButtonRole.AcceptRole)
+        get.setProperty("primary", True)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        skip = box.addButton("Skip this version", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(get)
+        box.exec()
+        if box.clickedButton() is get:
+            QDesktopServices.openUrl(QUrl(r.get("download") or r["url"]))
+            if r.get("download"):
+                self.toast("Downloading. Open the DMG and drag nitpix to Applications, replacing this copy.")
+        elif box.clickedButton() is skip:
+            st.setValue("updates/skip", r["latest"])
+
     def show_help(self):
         rows = [("1–6", "Switch view"), ("/", "Search media"), ("↑ ↓", "Move in list"), ("Enter", "Open asset"), ("?", "This help"),
                 ("← →", "Step one frame"), ("⇧← ⇧→", "Step one second"), ("Space", "Play / pause"), ("Home End", "First / last frame"),
@@ -935,6 +1004,8 @@ def run(project: str | None = None) -> int:
     win.show()
     if not os.environ.get("NITPIX_SCREENSHOT") and not os.environ.get("NITPIX_NO_DEPS_CHECK"):
         QTimer.singleShot(0, lambda: (deps.check(win), win.refresh_rail()))
+    if not os.environ.get("NITPIX_SCREENSHOT") and not os.environ.get("NITPIX_STRESS") and not os.environ.get("NITPIX_NO_UPDATE_CHECK"):
+        QTimer.singleShot(3000, win.check_updates)  # after the window is up; quiet unless there is news
     if project:
         win.open_project(project)
     if os.environ.get("NITPIX_STRESS") and win.session.project:  # verification: rapid asset switching

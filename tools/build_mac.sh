@@ -12,7 +12,7 @@ codesign --force --deep --sign - dist/nitpix.app
 echo "built: dist/nitpix.app ($(du -sh dist/nitpix.app | cut -f1))"
 dist/nitpix.app/Contents/MacOS/nitpix --selfcheck
 # Installer: a drag-to-Applications disk image. Everything the app needs is inside the bundle.
-VER=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+VER=$(sed -n 's/^__version__ = "\([^"]*\)".*/\1/p' nitpix/__init__.py)
 DMG="dist/nitpix-${VER}.dmg"
 STAGE=$(mktemp -d)
 cp -R dist/nitpix.app "$STAGE/"

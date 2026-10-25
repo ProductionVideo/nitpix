@@ -59,6 +59,10 @@ class Screens(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        from PySide6.QtCore import QSettings
+        cls.settings_dir = tempfile.mkdtemp(prefix="nitpix settings ")
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)  # keep tests out of the real preferences
+        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, cls.settings_dir)
         cls.app.setStyleSheet(theme.STYLESHEET)
         cls.tmp = tempfile.mkdtemp(prefix="nitpix ui ")
 
@@ -266,6 +270,18 @@ class Screens(unittest.TestCase):
         self.assertEqual(ps.current["name"], "Edited then used")
         self.assertEqual(ps.current["video"]["width"], 2048)
         self.assertEqual(self.win.session.project.settings["preset_id"], ps.current["id"])
+
+    def test_update_results_are_reported(self):
+        self.win._update_ready({"current": "0.5.1", "error": "Could not reach GitHub: offline"}, True)
+        self.assertIn("Could not reach", self.win.toast_lab.text())
+        self.win._update_ready({"current": "0.5.1", "latest": "0.5.1", "newer": False}, True)
+        self.assertIn("up to date", self.win.toast_lab.text())
+        self.win.toast_lab.setText("")
+        self.win._update_ready({"current": "0.5.1", "error": "offline"}, False)   # the start-up check stays quiet
+        self.assertEqual(self.win.toast_lab.text(), "")
+        self.win.show_view("settings")
+        from nitpix import __version__
+        self.assertIn(__version__, self.win.settings_screen.version_lab.text())
 
     def test_other_screens_build(self):
         for v in ("dashboard", "presets", "reports", "settings"):

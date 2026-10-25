@@ -14,6 +14,7 @@ from PyInstaller.utils.hooks import collect_submodules  # noqa: E402
 LIBMPV = os.environ.get("NITPIX_LIBMPV") or next(p for p in ("/opt/homebrew/lib/libmpv.2.dylib", "/usr/local/lib/libmpv.2.dylib", "/usr/lib/libmpv.so.2") if os.path.exists(p))
 FFBIN = os.environ.get("NITPIX_FFMPEG_BIN") or next(d for d in ("/opt/homebrew/opt/ffmpeg-full/bin", "/opt/homebrew/opt/ffmpeg/bin", "/usr/local/bin", "/usr/bin") if os.path.exists(os.path.join(d, "ffmpeg")))
 EXT = ".exe" if sys.platform == "win32" else ""
+from nitpix import __version__ as VERSION  # noqa: E402
 
 binaries = [(LIBMPV, "."), (os.path.join(FFBIN, "ffmpeg" + EXT), "."), (os.path.join(FFBIN, "ffprobe" + EXT), ".")]
 datas = [(os.path.join(ROOT, "nitpix", "web"), os.path.join("nitpix", "web"))]
@@ -42,8 +43,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "nitpix",
         "CFBundleDisplayName": "nitpix",
-        "CFBundleShortVersionString": "0.5.1",
-        "CFBundleVersion": "0.5.1",
+        "CFBundleShortVersionString": VERSION,
+        "CFBundleVersion": VERSION,
         "LSMinimumSystemVersion": "12.0",
         "NSHighResolutionCapable": True,
         "NSPrincipalClass": "NSApplication",

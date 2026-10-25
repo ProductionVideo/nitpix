@@ -12,6 +12,10 @@ Source media is only ever **read**. Everything the app writes goes inside the pr
 
 Download `nitpix-<version>.dmg` from the latest GitHub release, open it and drag **nitpix** to Applications. The app is self-contained: ffmpeg, ffprobe, libmpv and Qt are inside, nothing else to install. It is not yet notarised, so the first launch needs **right-click ▸ Open** (once); after that it opens normally. Apple Silicon and Intel are both built from the machine's own architecture, so a build made on Apple Silicon runs natively there.
 
+### Updates
+
+nitpix checks GitHub for a newer release when it starts (at most once a day, quietly when offline) and offers to download it; Help ▸ Check for Updates… and Settings ▸ Updates do the same on demand, and the automatic check can be switched off there. It only reads the public releases list and opens the download in your browser; nothing is installed without you.
+
 ## Running
 
 ```bash
