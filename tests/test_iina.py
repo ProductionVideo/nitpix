@@ -1,5 +1,6 @@
 """IINA bridge tests against tests/fakeiina.py, which mimics the IINA quirks the bridge
 works around. Runs on any OS: python3 -m unittest tests.test_iina"""
+import os as _os, tempfile as _tempfile; _os.environ.setdefault("NITPIX_STATE_DIR", _tempfile.mkdtemp(prefix="nitpix state "))  # keep the real recent list untouched
 import json
 import os
 import shutil

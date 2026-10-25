@@ -50,7 +50,14 @@ app = BUNDLE(
         "NSPrincipalClass": "NSApplication",
         "LSApplicationCategoryType": "public.app-category.video",
         "NSHumanReadableCopyright": "© Jake Stebbings",
-        "CFBundleDocumentTypes": [{"CFBundleTypeName": "nitpix project", "CFBundleTypeRole": "Editor", "LSHandlerRank": "Owner",
-                                   "LSItemContentTypes": ["com.jakestebbings.nitpix.project"]}],
+        "CFBundleDocumentTypes": [
+            {"CFBundleTypeName": "nitpix project", "CFBundleTypeRole": "Editor", "LSHandlerRank": "Owner",
+             "LSItemContentTypes": ["com.jakestebbings.nitpix.project"]},
+            # media and folders can be dropped on the Dock icon or opened with nitpix; "Alternate" never
+            # makes nitpix the default app for them
+            {"CFBundleTypeName": "Media for QC", "CFBundleTypeRole": "Viewer", "LSHandlerRank": "Alternate",
+             "LSItemContentTypes": ["public.folder", "public.movie", "public.audio", "public.image",
+                                    "com.apple.quicktime-movie", "public.mpeg-4", "org.openexr.exr", "public.data"]},
+        ],
     },
 )

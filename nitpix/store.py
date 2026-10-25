@@ -349,9 +349,15 @@ class Project:
             self.conn.close()
 
 
-RECENT_FILE = Path.home() / ".nitpix" / "recent.json"
+# NITPIX_STATE_DIR moves the app's own state (the recent-projects list); the tests point it at a
+# temporary folder so they never touch the user's list.
+def _recent_file() -> Path:  # looked up on each use, so the override works whenever it is set
+    return Path(os.environ.get("NITPIX_STATE_DIR") or Path.home() / ".nitpix") / "recent.json"
+
+
+RECENT_FILE = _recent_file()
 _OLD_RECENT = Path.home() / ".lhs-qc-review" / "recent.json"  # before the rename to nitpix
-if not RECENT_FILE.exists() and _OLD_RECENT.exists():
+if not os.environ.get("NITPIX_STATE_DIR") and not RECENT_FILE.exists() and _OLD_RECENT.exists():
     try:
         RECENT_FILE.parent.mkdir(parents=True, exist_ok=True)
         RECENT_FILE.write_text(_OLD_RECENT.read_text())
@@ -360,19 +366,20 @@ if not RECENT_FILE.exists() and _OLD_RECENT.exists():
 
 
 def remember_project(folder: Path, name: str):
-    RECENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    f = _recent_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
     try:
-        items = json.loads(RECENT_FILE.read_text())
+        items = json.loads(f.read_text())
     except Exception:
         items = []
     items = [i for i in items if i.get("path") != str(folder)]
     items.insert(0, {"path": str(folder), "name": name, "opened": time.time()})
-    RECENT_FILE.write_text(json.dumps(items[:12], indent=1))
+    f.write_text(json.dumps(items[:12], indent=1))
 
 
 def recent_projects() -> list[dict]:
     try:
-        items = json.loads(RECENT_FILE.read_text())
+        items = json.loads(_recent_file().read_text())
     except Exception:
         return []
     return [i for i in items if Path(i["path"], "project.db").exists()]

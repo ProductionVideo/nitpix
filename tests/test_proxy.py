@@ -3,6 +3,7 @@
 Each clip draws its frame index as 8 black/white bars, so a proxy frame can be read
 back and checked against the frame it should be, including at 29.97 and across the
 gaps of an image sequence."""
+import os as _os, tempfile as _tempfile; _os.environ.setdefault("NITPIX_STATE_DIR", _tempfile.mkdtemp(prefix="nitpix state "))  # keep the real recent list untouched
 import json
 import os
 import shutil

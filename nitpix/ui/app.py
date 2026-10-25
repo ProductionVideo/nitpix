@@ -25,6 +25,7 @@ from . import deps, theme
 from .media import AssetModel, MediaScreen, setup_columns
 from .mpvwidget import gl_format
 from .presets import PresetsScreen
+from .shortcuts import ShortcutsDialog
 from .review import ReviewScreen, btn, chip
 from .widgets import ElideLabel, nav_icon
 
@@ -567,10 +568,11 @@ class MainWindow(QMainWindow):
         self.close_btn.setToolTip("Close project")
         self.close_btn.clicked.connect(self.close_project)
         rl.addWidget(self.close_btn)
-        self.help_lab = QLabel("? shortcuts")
-        self.help_lab.setFont(theme.mono(10))
-        self.help_lab.setProperty("faint", True)
-        self.help_lab.setContentsMargins(4, 2, 0, 0)
+        self.help_lab = QPushButton("?  Shortcuts")
+        self.help_lab.setProperty("nav", True)
+        self.help_lab.setToolTip("Shortcuts and power moves for this screen (?)")
+        self.help_lab.setStyleSheet(f"color: {theme.T['muted']}; font-size: 12px;")
+        self.help_lab.clicked.connect(self.show_help)
         rl.addWidget(self.help_lab)
         root.addWidget(rail)
         self.rail = rail
@@ -617,14 +619,34 @@ class MainWindow(QMainWindow):
         self.show_view("start")
         self.refresh_rail()
         QApplication.instance().installEventFilter(self)
+        self.setAcceptDrops(True)
+        self.pending_roots: list[str] = []   # dropped while a scan was running; scanned next
+        self.drop_hint = QLabel("Drop to scan into this project", self)
+        self.drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.drop_hint.setStyleSheet(f"background: rgba(12,12,12,200); color: {theme.T['ink']}; font-size: 20px; font-weight: 600;"
+                                     f"border: 2px dashed {theme.T['focus']}; border-radius: 12px;")
+        self.drop_hint.hide()
 
     def eventFilter(self, obj, ev):
         """Transport keys reach the player from anywhere in the review screen: a button that was
         just clicked, the tabs, the metadata tree. Text fields and dialogs keep their keys."""
-        if ev.type() == QEvent.Type.KeyPress and getattr(self, "current_view", None) == "review" and QApplication.activeModalWidget() is None:
+        if ev.type() == QEvent.Type.FileOpen:  # a file or folder dropped on the Dock icon / opened with nitpix
+            self.ingest([ev.file()])
+            return True
+        if ev.type() == QEvent.Type.KeyPress and QApplication.activeModalWidget() is None:
             fw = QApplication.focusWidget() or (obj if isinstance(obj, QWidget) else None)
-            if not text_focused(fw) and (fw is None or fw.window() is self) and self.review.handle_key(ev):
-                return True
+            if not text_focused(fw) and (fw is None or fw.window() is self):
+                view = getattr(self, "current_view", None)
+                if view == "review" and self.review.handle_key(ev):
+                    return True
+                t = ev.text()
+                if t == "?":
+                    self.show_help()
+                    return True
+                if view != "review" and t.isdigit() and 1 <= int(t) <= len(VIEWS) and self.session.project \
+                        and not ev.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
+                    self.show_view(VIEWS[int(t) - 1])
+                    return True
         return super().eventFilter(obj, ev)
 
     # ---- project lifecycle -------------------------------------------------------
@@ -768,7 +790,6 @@ class MainWindow(QMainWindow):
         c = self.rail_collapsed
         self.rail.setFixedWidth(52 if c else 168)
         self.brand.setVisible(not c)
-        self.help_lab.setVisible(not c)
         self.rail_toggle.setIcon(nav_icon("expand" if c else "collapse", theme.T["muted"], theme.T["accent_ink"]))
         self.rail_toggle.setIconSize(QSize(18, 18))
         for v, b in self.nav.items():
@@ -777,6 +798,7 @@ class MainWindow(QMainWindow):
             b.style().unpolish(b)
             b.style().polish(b)
         self.close_btn.setText("" if c else "Close project")
+        self.help_lab.setText("?" if c else "?  Shortcuts")
         self.close_btn.setProperty("iconOnly", c)
         self.close_btn.style().unpolish(self.close_btn)
         self.close_btn.style().polish(self.close_btn)
@@ -854,6 +876,13 @@ class MainWindow(QMainWindow):
         if state in ("running", "paused"):
             if self.current_view == "media":
                 self._refresh_list()
+        if self.pending_roots and not jobs.active:
+            roots, self.pending_roots = self.pending_roots, []
+            try:
+                jobs.scan_roots(roots)
+                self.toast(f"Scanning {len(roots)} queued item(s)")
+            except Exception as e:
+                self.toast(str(e), True)
         if state != self.last_job_state and self.last_job_state in ("running", "paused", "cancelling"):
             self._refresh_list(force=True)
             if self.current_view == "dashboard":
@@ -890,6 +919,69 @@ class MainWindow(QMainWindow):
             return self.show_view(VIEWS[int(t) - 1])
         super().keyPressEvent(ev)
 
+    # ---- drag and drop ---------------------------------------------------------------
+    @staticmethod
+    def _dropped_paths(ev) -> list[str]:
+        md = ev.mimeData()
+        return [u.toLocalFile() for u in md.urls() if u.isLocalFile() and u.toLocalFile()] if md.hasUrls() else []
+
+    def dragEnterEvent(self, ev):
+        paths = self._dropped_paths(ev)
+        if not paths:
+            return ev.ignore()
+        ev.acceptProposedAction()
+        proj = any(p.rstrip("/").endswith((".nitpix", ".lhsqc")) for p in paths)
+        self.drop_hint.setText("Drop to open this project" if proj else
+                               ("Drop to scan into this project" if self.session.project else "Drop to start a project with this media"))
+        self.drop_hint.setGeometry(self.rect().adjusted(24, 24, -24, -24))
+        self.drop_hint.show()
+        self.drop_hint.raise_()
+
+    def dragMoveEvent(self, ev):
+        ev.acceptProposedAction() if self._dropped_paths(ev) else ev.ignore()
+
+    def dragLeaveEvent(self, ev):
+        self.drop_hint.hide()
+
+    def dropEvent(self, ev):
+        self.drop_hint.hide()
+        paths = self._dropped_paths(ev)
+        if paths:
+            ev.acceptProposedAction()
+            QTimer.singleShot(0, lambda: self.ingest(paths))  # let the drag finish before any dialog
+
+    def ingest(self, paths: list[str]):
+        """Take media from anywhere (window drop, Dock icon, Finder "Open With") and scan it now.
+        A dropped project folder opens; with no project open, one is made next to the others."""
+        paths = [os.path.abspath(p) for p in paths if p and os.path.exists(p)]
+        if not paths:
+            return
+        projects = [p for p in paths if p.rstrip("/").endswith((".nitpix", ".lhsqc"))]
+        if projects:
+            return self.open_project(projects[0])
+        if not self.session.project:
+            base = Path(paths[0])
+            name = (base.name if base.is_dir() else base.stem) or "Quick review"
+            folder = Path(os.path.expanduser("~/nitpix Projects"))
+            slug = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name).strip().replace(" ", "_") or "Quick_review"
+            target, i = folder / f"{slug}.nitpix", 2
+            while target.exists():
+                target, i = folder / f"{slug}_{i}.nitpix", i + 1
+            self.open_project(str(target), name)
+            if not self.session.project:
+                return
+        jobs = self.session.jobs
+        if jobs.active:
+            self.pending_roots += [p for p in paths if p not in self.pending_roots]
+            self.toast(f"Queued {len(paths)} item(s); they scan when the current batch finishes")
+            return
+        try:
+            jobs.scan_roots(paths)
+        except Exception as e:
+            return self.toast(str(e), True)
+        self.toast(f"Scanning {Path(paths[0]).name}" + (f" and {len(paths) - 1} more" if len(paths) > 1 else ""))
+        self.show_view("media")
+
     # ---- updates ---------------------------------------------------------------------
     def check_updates(self, manual: bool = False):
         """Ask GitHub for the latest release in a thread; the answer comes back as update_result."""
@@ -925,30 +1017,69 @@ class MainWindow(QMainWindow):
         box.setText(f"<b>nitpix {r['latest']}</b> is available. You have {r['current']}.")
         notes = r.get("notes") or ""
         box.setInformativeText((notes[:600] + ("…" if len(notes) > 600 else "")) if notes else "See the release page for what changed.")
-        get = box.addButton("Download", QMessageBox.ButtonRole.AcceptRole)
-        get.setProperty("primary", True)
+        inst = None
+        if r.get("download") and updates.can_install():
+            inst = box.addButton("Install and relaunch", QMessageBox.ButtonRole.AcceptRole)
+            inst.setProperty("primary", True)
+        get = box.addButton("Download" if inst is None else "Download only", QMessageBox.ButtonRole.ActionRole)
+        get.setProperty("primary", inst is None)
         box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
         skip = box.addButton("Skip this version", QMessageBox.ButtonRole.DestructiveRole)
-        box.setDefaultButton(get)
+        box.setDefaultButton(inst or get)
         box.exec()
-        if box.clickedButton() is get:
+        if inst is not None and box.clickedButton() is inst:
+            self._install_update(r)
+        elif box.clickedButton() is get:
             QDesktopServices.openUrl(QUrl(r.get("download") or r["url"]))
             if r.get("download"):
                 self.toast("Downloading. Open the DMG and drag nitpix to Applications, replacing this copy.")
         elif box.clickedButton() is skip:
             st.setValue("updates/skip", r["latest"])
 
+    def _install_update(self, r: dict):
+        from PySide6.QtWidgets import QProgressDialog
+        jobs = self.session.jobs
+        if jobs and jobs.active:
+            return self.toast("Finish or cancel the running scan before updating.", True)
+        dlg = QProgressDialog(f"Downloading nitpix {r['latest']}…", "", 0, 100, self)
+        dlg.setWindowTitle("Updating nitpix")
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        state = {"pct": 0, "done": None, "error": None}
+
+        def work():
+            try:
+                state["done"] = updates.install(r["download"], progress=lambda d, t: state.__setitem__("pct", int(100 * d / t) if t else 0))
+            except Exception as e:
+                state["error"] = str(e)
+
+        threading.Thread(target=work, daemon=True).start()
+        timer = QTimer(self, interval=150)
+
+        def poll():
+            dlg.setValue(min(99, state["pct"]))
+            if state["pct"] >= 100:
+                dlg.setLabelText("Installing…")
+            if state["error"] or state["done"]:
+                timer.stop()
+                dlg.close()
+                if state["error"]:
+                    self.toast("Update failed: " + state["error"][-200:], True)
+                else:
+                    updates.relaunch(state["done"])
+                    self.close()
+        timer.timeout.connect(poll)
+        timer.start()
+        dlg.exec()
+
     def show_help(self):
-        rows = [("1–6", "Switch view"), ("/", "Search media"), ("↑ ↓", "Move in list"), ("Enter", "Open asset"), ("?", "This help"),
-                ("← →", "Step one frame"), ("⇧← ⇧→", "Step one second"), ("Space", "Play / pause"), ("Home End", "First / last frame"),
-                ("e", "Open in IINA here"), ("g", "Go to timecode / frame"), ("i o", "Set in / out"), ("b", "Bookmark"), ("n", "Add note"),
-                ("[ ]", "Previous / next marker (finding or note)"), ("j k", "Focus next / previous finding"), ("1 2 3 4", "Pass / Issue / Warning / N/A (review)"),
-                ("0", "Clear decision"), (", .", "Previous / next asset"), ("a r", "Approve / reject asset"), ("Esc", "Back to media list")]
-        html = "<table cellpadding=4>" + "".join(f"<tr><td style='font-family:IBM Plex Mono;color:{theme.T['muted']}'>{k}</td><td>{v}</td></tr>" for k, v in rows) + "</table>"
-        QMessageBox.information(self, "Keyboard shortcuts", html)
+        ShortcutsDialog(self, getattr(self, "current_view", None)).exec()
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
+        if self.drop_hint.isVisible():
+            self.drop_hint.setGeometry(self.rect().adjusted(24, 24, -24, -24))
         if self.toast_lab.isVisible():
             self.toast_lab.move((self.width() - self.toast_lab.width()) // 2, self.height() - self.toast_lab.height() - 24)
 

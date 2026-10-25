@@ -54,3 +54,78 @@ def check(current: str = __version__, timeout: float = 6.0, opener=urllib.reques
     return {"current": current, "latest": latest, "newer": bool(latest) and is_newer(latest, current),
             "url": d.get("html_url") or RELEASES, "download": _asset_for_platform(d.get("assets") or []),
             "notes": (d.get("body") or "").strip(), "name": d.get("name") or f"nitpix {latest}"}
+
+
+def bundle_path() -> str | None:
+    """The running nitpix.app, when this is the packaged macOS app; None when run from source."""
+    import os
+    import sys
+    if platform.system() != "Darwin" or not getattr(sys, "frozen", False):
+        return None
+    p = os.path.abspath(sys.executable)
+    while p != "/" and not p.endswith(".app"):
+        p = os.path.dirname(p)
+    return p if p.endswith(".app") else None
+
+
+def can_install() -> bool:
+    import os
+    b = bundle_path()
+    return bool(b) and os.access(os.path.dirname(b), os.W_OK)
+
+
+def install(dmg_url: str, app_path: str | None = None, progress=None, opener=urllib.request.urlopen) -> str:
+    """Download the release DMG and replace `app_path` (default: this app) with the nitpix.app in it.
+    Downloaded by Python, so the file has no quarantine flag and macOS opens the new version without
+    the unidentified-developer prompt. Returns the installed path; raises on failure, leaving the
+    current app untouched until the new copy is complete."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    target = app_path or bundle_path()
+    if not target:
+        raise RuntimeError("In-app install works in the packaged macOS app only.")
+    tmp = tempfile.mkdtemp(prefix="nitpix-update-")
+    dmg, mnt = os.path.join(tmp, "nitpix.dmg"), os.path.join(tmp, "mnt")
+    try:
+        req = urllib.request.Request(dmg_url, headers={"User-Agent": f"nitpix/{__version__}"})
+        with opener(req, timeout=60) as r, open(dmg, "wb") as f:
+            total, done = int(r.headers.get("Content-Length") or 0), 0
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total)
+        os.mkdir(mnt)
+        subprocess.run(["hdiutil", "attach", "-nobrowse", "-readonly", "-quiet", "-mountpoint", mnt, dmg], check=True)
+        try:
+            src = os.path.join(mnt, "nitpix.app")
+            if not os.path.isdir(src):
+                raise RuntimeError("The downloaded disk image has no nitpix.app.")
+            staged = target + ".new"
+            shutil.rmtree(staged, ignore_errors=True)
+            subprocess.run(["ditto", src, staged], check=True)
+        finally:
+            subprocess.run(["hdiutil", "detach", "-quiet", mnt], check=False)
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", staged], check=False)
+        old = target + ".old"
+        shutil.rmtree(old, ignore_errors=True)
+        if os.path.exists(target):
+            os.rename(target, old)  # the running copy keeps working from its open files
+        os.rename(staged, target)
+        shutil.rmtree(old, ignore_errors=True)
+        return target
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def relaunch(app_path: str):
+    """Open `app_path` again once this process has gone."""
+    import os
+    import subprocess
+    subprocess.Popen(["/bin/sh", "-c", f'while kill -0 {os.getpid()} 2>/dev/null; do sleep 0.3; done; open "$0"', app_path],
+                     start_new_session=True)

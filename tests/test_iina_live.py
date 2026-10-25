@@ -8,6 +8,7 @@ checks both what is on screen and what the app reads back. Media goes in a folde
 spaces in its name, since that is what broke sequence playback before. Only the IINA
 processes this test started are closed afterwards.
 """
+import os as _os, tempfile as _tempfile; _os.environ.setdefault("NITPIX_STATE_DIR", _tempfile.mkdtemp(prefix="nitpix state "))  # keep the real recent list untouched
 import os
 import platform
 import shutil

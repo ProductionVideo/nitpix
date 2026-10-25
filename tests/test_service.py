@@ -1,4 +1,5 @@
 """The shared service layer, on a temporary project with hand-made assets and findings."""
+import os as _os, tempfile as _tempfile; _os.environ.setdefault("NITPIX_STATE_DIR", _tempfile.mkdtemp(prefix="nitpix state "))  # keep the real recent list untouched
 import os
 import shutil
 import tempfile

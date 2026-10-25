@@ -10,11 +10,27 @@ Source media is only ever **read**. Everything the app writes goes inside the pr
 
 ## Install (macOS)
 
-Download `nitpix-<version>.dmg` from the latest GitHub release, open it and drag **nitpix** to Applications. The app is self-contained: ffmpeg, ffprobe, libmpv and Qt are inside, nothing else to install. It is not yet notarised, so the first launch needs **right-click ▸ Open** (once); after that it opens normally. Apple Silicon and Intel are both built from the machine's own architecture, so a build made on Apple Silicon runs natively there.
+Paste this into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ProductionVideo/nitpix/main/install.sh | bash
+```
+
+It downloads the latest release, puts nitpix in Applications and opens it. Installed this way, macOS does not block the first launch: the "unidentified developer" check only applies to files a browser downloaded, and the in-app updater installs the same way. Run the same line again to update.
+
+Or download `nitpix-<version>.dmg` from the latest GitHub release and drag nitpix to Applications. That copy is flagged by the browser, so the first launch needs **System Settings ▸ Privacy & Security ▸ Open Anyway** (older macOS: right-click ▸ Open). The proper fix is an Apple Developer ID signature and notarisation, which nitpix does not have yet.
+
+Either way the app is self-contained (ffmpeg, ffprobe, libmpv and Qt are inside) and built for Apple Silicon.
+
+## Getting media in
+
+Drop files or folders anywhere on the window, or on the nitpix icon in the Dock, and they scan straight away; with no project open, nitpix starts one named after what you dropped. Drops made during a scan queue and start when it finishes. A dropped `.nitpix` folder opens that project. **Add media** still offers the full dialog (re-check unchanged files, pick an image sequence by one frame).
+
+Press **?** (or "? Shortcuts" in the sidebar) on any screen for the keys and power moves that apply there.
 
 ### Updates
 
-nitpix checks GitHub for a newer release when it starts (at most once a day, quietly when offline) and offers to download it; Help ▸ Check for Updates… and Settings ▸ Updates do the same on demand, and the automatic check can be switched off there. It only reads the public releases list and opens the download in your browser; nothing is installed without you.
+nitpix checks GitHub for a newer release when it starts (at most once a day, quietly when offline) and offers to install it in place and relaunch (the packaged app) or download it; Help ▸ Check for Updates… and Settings ▸ Updates do the same on demand, and the automatic check can be switched off there. It only reads the public releases list, and nothing is installed until you choose Install.
 
 ## Running
 

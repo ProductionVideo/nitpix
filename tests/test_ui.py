@@ -1,5 +1,6 @@
 """Desktop UI, offscreen and without libmpv: frame maths, screens build and react, timeline
 paints. Needs PySide6 (the .venv): .venv/bin/python -m unittest tests.test_ui"""
+import os as _os, tempfile as _tempfile; _os.environ.setdefault("NITPIX_STATE_DIR", _tempfile.mkdtemp(prefix="nitpix state "))  # keep the real recent list untouched
 import importlib.util
 import json
 import os
@@ -282,6 +283,60 @@ class Screens(unittest.TestCase):
         self.win.show_view("settings")
         from nitpix import __version__
         self.assertIn(__version__, self.win.settings_screen.version_lab.text())
+
+    def test_drop_media_scans_straight_away(self):
+        from PySide6.QtCore import QMimeData, QPointF, QUrl
+        from PySide6.QtGui import QDropEvent
+        media = tempfile.mkdtemp(dir=self.tmp, prefix="drop ")
+        for i in range(1, 4):
+            open(os.path.join(media, f"plate.{1000 + i}.png"), "wb").write(b"x")
+        md = QMimeData()
+        md.setUrls([QUrl.fromLocalFile(media)])
+        calls = []
+        self.win.session.jobs.scan_roots = lambda roots, force=False: calls.append(roots)
+        self.win.dropEvent(QDropEvent(QPointF(10, 10), Qt.DropAction.CopyAction, md, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        self.app.processEvents()
+        self.assertEqual(calls, [[os.path.abspath(media)]])
+        self.assertEqual(self.win.current_view, "media")
+
+    def test_drop_with_no_project_makes_one(self):
+        self.win.close_project()
+        media = tempfile.mkdtemp(dir=self.tmp, prefix="Client delivery ")
+        home = tempfile.mkdtemp(dir=self.tmp)
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        try:
+            self.win.ingest([media])
+        finally:
+            os.environ["HOME"] = old
+        p = self.win.session.project
+        self.assertIsNotNone(p)
+        self.assertTrue(os.path.realpath(str(p.folder)).startswith(os.path.realpath(os.path.join(home, "nitpix Projects"))), p.folder)
+        self.assertEqual(p.settings["project_name"], os.path.basename(media))
+
+    def test_drop_during_a_scan_queues(self):
+        jobs = self.win.session.jobs
+        started = []
+        jobs.scan_roots = lambda roots, force=False: started.append(roots)
+        from unittest import mock
+        with mock.patch.object(type(jobs), "active", new_callable=mock.PropertyMock, return_value=object()):
+            self.win.ingest([self.tmp])
+            self.assertEqual((started, self.win.pending_roots), ([], [os.path.abspath(self.tmp)]))
+        self.win._poll()                                    # the batch is over: the queue starts
+        self.assertEqual((started, self.win.pending_roots), ([[os.path.abspath(self.tmp)]], []))
+
+    def test_question_mark_opens_contextual_shortcuts(self):
+        from nitpix.ui.shortcuts import ShortcutsDialog
+        opened = []
+        self.win.show_help = lambda: opened.append(self.win.current_view)
+        self.win.show_view("media")
+        self.win.media.table.setFocus()
+        self.app.sendEvent(self.win.media.table, QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Question, Qt.KeyboardModifier.ShiftModifier, "?"))
+        self.assertEqual(opened, ["media"])                  # the table's type-to-find no longer eats it
+        dlg = ShortcutsDialog(self.win, "review")
+        self.assertIn("this screen", dlg.nav.item(0).text())
+        self.assertIn("Space", dlg.body.text())
+        dlg.deleteLater()
 
     def test_other_screens_build(self):
         for v in ("dashboard", "presets", "reports", "settings"):
