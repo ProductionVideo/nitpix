@@ -12,6 +12,7 @@ signals before touching widgets.
 from __future__ import annotations
 
 import os
+import sys
 from fractions import Fraction
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
@@ -21,7 +22,12 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from .. import libmpv, playlist
 from ..timecode import asset_rate
 
-HWDEC = "auto-copy-safe"  # frames land in system memory, so screenshots and QC readback work
+# Copy-back decoding only, so frames land in system memory and screenshots / QC readback work.
+# On macOS the decoder is named explicitly: "auto" lets FFmpeg 8 pick its Vulkan ProRes decoder,
+# which runs through MoltenVK and crashed the app on file switches (Metal completion handler
+# touching a destroyed queue). VideoToolbox covers ProRes, H.264 and HEVC; the rest decode in
+# software. NITPIX_HWDEC overrides it for debugging.
+HWDEC = os.environ.get("NITPIX_HWDEC") or ("videotoolbox-copy" if sys.platform == "darwin" else "auto-copy-safe")
 
 
 def gl_format() -> QSurfaceFormat:
@@ -96,6 +102,7 @@ class MpvWidget(QOpenGLWidget):
             self.m = libmpv.mpv.MPV(vo="libmpv", keep_open="yes", pause=True, hr_seek="yes", hwdec=HWDEC,
                                    resume_playback=False, idle="yes", osd_level=1, osd_duration=1500,
                                    input_default_bindings=False, input_vo_keyboard=False, ytdl=False,
+                                   load_scripts=False, osc=False,  # no Lua stats/console/OSC threads; the app draws its own UI
                                    screenshot_format="png", screenshot_high_bit_depth="no",
                                    log_handler=lambda lvl, pfx, msg: self.relay.log.emit(lvl, pfx, msg), loglevel="warn")
             for p in ("time-pos", "pause", "eof-reached"):

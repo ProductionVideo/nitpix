@@ -900,6 +900,30 @@ class MainWindow(QMainWindow):
         super().closeEvent(ev)
 
 
+def _stress(app, win, count: int):
+    """Jump between assets like a reviewer holding '.', sometimes playing; print what was used."""
+    import random
+    ids = [r["id"] for r in service.list_assets(win.session.project)]
+    seen, n = set(), [0]
+
+    def tick():
+        rv = win.review
+        if rv.player.loaded:
+            seen.add(str(rv.player.video_params().get("hwdec")))
+        win.show_asset(random.choice(ids))
+        if rv.player.loaded and random.random() < 0.3:
+            rv.toggle_play()
+        n[0] += 1
+        if n[0] < count:
+            QTimer.singleShot(random.choice((40, 80, 150, 300, 600)), tick)
+        else:
+            libs = subprocess.run(["lsof", "-p", str(os.getpid())], capture_output=True, text=True).stdout
+            print(f"stress ok: {n[0]} switches, hwdec {sorted(seen)}, MoltenVK loaded: {'MoltenVK' in libs}", flush=True)
+            win.close()
+            app.quit()
+    QTimer.singleShot(1500, tick)
+
+
 def run(project: str | None = None) -> int:
     QSurfaceFormat.setDefaultFormat(gl_format())
     app = QApplication.instance() or QApplication(sys.argv)
@@ -913,6 +937,8 @@ def run(project: str | None = None) -> int:
         QTimer.singleShot(0, lambda: (deps.check(win), win.refresh_rail()))
     if project:
         win.open_project(project)
+    if os.environ.get("NITPIX_STRESS") and win.session.project:  # verification: rapid asset switching
+        _stress(app, win, int(os.environ["NITPIX_STRESS"]))
     shot = os.environ.get("NITPIX_SCREENSHOT")
     if shot:  # verification of packaged builds: grab the window after a few seconds and quit
         aid = os.environ.get("NITPIX_SCREENSHOT_ASSET")

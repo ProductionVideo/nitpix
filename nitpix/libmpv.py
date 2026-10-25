@@ -53,6 +53,15 @@ def find_libmpv() -> str | None:
 
 
 LIBMPV = find_libmpv()
+
+# The bundled libmpv links a Vulkan loader. Left alone, it loads whatever Vulkan driver the host
+# has installed (Homebrew's MoltenVK on a dev Mac, nothing on a clean one), so the packaged app
+# behaved differently per machine and crashed inside MoltenVK. The player renders through OpenGL
+# and decodes through VideoToolbox, so it needs no Vulkan driver: point the loader at none.
+if _SYSTEM == "Darwin" and getattr(sys, "frozen", False) and not os.environ.get("NITPIX_ALLOW_VULKAN"):
+    for _var in ("VK_DRIVER_FILES", "VK_ICD_FILENAMES"):
+        os.environ[_var] = os.path.join(getattr(sys, "_MEIPASS", ""), "no-vulkan-drivers.json")
+    os.environ["VK_LOADER_LAYERS_DISABLE"] = "~all~"
 _find = ctypes.util.find_library
 
 

@@ -42,8 +42,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "nitpix",
         "CFBundleDisplayName": "nitpix",
-        "CFBundleShortVersionString": "0.5.0",
-        "CFBundleVersion": "0.5.0",
+        "CFBundleShortVersionString": "0.5.1",
+        "CFBundleVersion": "0.5.1",
         "LSMinimumSystemVersion": "12.0",
         "NSHighResolutionCapable": True,
         "NSPrincipalClass": "NSApplication",
