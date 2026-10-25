@@ -320,8 +320,14 @@ class ReviewScreen(QWidget):
         self.range_lab.setProperty("muted", True)
         tr.addWidget(Cluster(self.in_btn, self.out_btn, self.range_lab, btn("×", "Clear in / out", lambda: self.set_inout(None), ghost=True)))
         tr.addWidget(Cluster(btn("⚑ Mark", "Bookmark this frame (b)", self.bookmark), btn("+ Note", "Note at this frame (n)", self.start_note)))
-        tr.addWidget(Cluster(btn("‹", "Previous finding ([)", lambda: self.jump_finding(-1), ghost=True),
-                             btn("Finding ›", "Next finding (])", lambda: self.jump_finding(1), ghost=True), spacing=0))
+        jl = QLabel("Markers")
+        jl.setProperty("muted", True)
+        jl.setToolTip("Findings and notes with a position on the timeline")
+        prev_b = btn("‹", "Previous finding or note ([)", lambda: self.jump_finding(-1))
+        next_b = btn("›", "Next finding or note (])", lambda: self.jump_finding(1))
+        for b in (prev_b, next_b):
+            b.setFixedWidth(32)
+        tr.addWidget(Cluster(prev_b, jl, next_b, spacing=6))
         ll.addLayout(tr)
         self.timeline = Timeline()
         self.timeline.seek_requested.connect(self.seek)
@@ -542,18 +548,28 @@ class ReviewScreen(QWidget):
             f["reviewer_note"] = text
             self.status.emit("Note saved", False)
 
+    def markers(self) -> list[tuple[int, str, dict]]:
+        """Positions worth jumping to: open or decided findings that are not a plain pass, and every note
+        or bookmark. Sorted by frame; findings before notes on the same frame."""
+        out = [(f["frame_in"], "finding", f) for f in self.asset["findings"]
+               if f.get("frame_in") is not None and f["check_key"] != "seq.range"
+               and (f.get("reviewer_status") or f["auto_result"]) not in ("pass", "info")]
+        out += [(n["frame"], "note", n) for n in self.asset["notes"] if n.get("frame") is not None]
+        return sorted(out, key=lambda m: (m[0], m[1] != "finding"))
+
     def jump_finding(self, d: int):
-        ms = sorted([f for f in self.asset["findings"] if f.get("frame_in") is not None and f["check_key"] != "seq.range"
-                     and (f.get("reviewer_status") or f["auto_result"]) not in ("pass", "info")], key=lambda f: f["frame_in"])
+        ms = self.markers()
         if not ms:
-            self.status.emit("No positioned findings on this asset", True)
+            self.status.emit("No findings or notes with a position on this asset", True)
             return
         if d > 0:
-            m = next((f for f in ms if f["frame_in"] > self.frame), ms[0])
+            m = next((x for x in ms if x[0] > self.frame), ms[0])
         else:
-            m = next((f for f in reversed(ms) if f["frame_in"] < self.frame), ms[-1])
-        self.seek(m["frame_in"])
-        self.tabs.setCurrentIndex(0)
+            m = next((x for x in reversed(ms) if x[0] < self.frame), ms[-1])
+        self.seek(m[0])
+        self.tabs.setCurrentIndex(0 if m[1] == "finding" else 1)
+        label = m[2]["title"] if m[1] == "finding" else (m[2].get("text") or "Bookmark")
+        self.player.osd(f"{self.ctx.label(m[0])}  {label[:60]}")
 
     def _marker(self, kind, mid):
         self.tabs.setCurrentIndex(0 if kind == "finding" else 1)

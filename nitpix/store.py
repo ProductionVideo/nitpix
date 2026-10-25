@@ -76,7 +76,7 @@ DEFAULT_SETTINGS = {
     "project_name": "Untitled delivery",
     "client": "",
     "reviewer": "",
-    "preset_id": "lhs_hd_prores_25",
+    "preset_id": "led_notchlc_1080p25",
     "analysis": {
         "content_checks": True,       # black / freeze / flash / silence
         "loudness": True,

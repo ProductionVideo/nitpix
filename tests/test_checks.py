@@ -92,6 +92,24 @@ class PresetComparison(unittest.TestCase):
         self.assertEqual(r["colour.chroma"]["auto_result"], "pass")
         self.assertEqual(r["colour.tags"]["auto_result"], "info")                        # the decoder's fixed tags are not a spec failure
 
+    def test_default_led_spec(self):
+        from nitpix.checks import still_findings
+        spec = PRESETS["led_notchlc_1080p25"]
+        good = meta(v_codec="notchlc", v_profile=None, v_pix_fmt="yuva444p12le", v_bit_depth=12, v_chroma="4:4:4", v_alpha=True,
+                    v_color_space="gbr", v_color_trc="iec61966-2-1", start_tc=None, a_codec="pcm_s16le")
+        r = results(good, spec)
+        for k in ("format.container", "format.codec", "format.resolution", "format.fps", "colour.bit_depth",
+                  "colour.alpha", "audio.codec", "audio.sample_rate"):
+            with self.subTest(check=k):
+                self.assertEqual(r[k]["auto_result"], "pass", r[k])
+        self.assertEqual(r["format.timecode"]["auto_result"], "info")
+        self.assertEqual(results(meta(v_alpha=False), spec)["colour.alpha"]["auto_result"], "fail")
+        self.assertEqual(results(meta(), spec)["format.codec"]["auto_result"], "fail")  # ProRes is not the spec
+        st = {f["check_key"]: f["auto_result"] for f in still_findings({"ok": True, "format": "png", "width": 1920, "height": 1080, "alpha": True, "size": 10}, None, spec, {})}
+        self.assertEqual((st["format.container"], st["format.resolution"], st["colour.alpha"]), ("pass", "pass", "pass"))
+        st = {f["check_key"]: f["auto_result"] for f in still_findings({"ok": True, "format": "jpeg", "width": 1280, "height": 720, "alpha": False, "size": 10}, None, spec, {})}
+        self.assertEqual((st["format.container"], st["format.resolution"], st["colour.alpha"]), ("fail", "fail", "fail"))
+
     def test_drop_frame_start_tc(self):
         p = custom(video={"start_tc": "01:00:00:00"})
         r = results(meta(v_fps="30000/1001", start_tc="01:00:00;00"), p)

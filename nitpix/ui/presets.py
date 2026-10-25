@@ -36,8 +36,11 @@ FIELDS = {
                  ("bit_depth", "Bit depths", "pick", "bit_depth"), ("start_frame", "Start frame", "int", "1001"),
                  ("padding", "Padding", "int", "4"), ("naming_regex", "Name prefix regex", "regex", r"^[A-Za-z0-9_]+\.$"),
                  ("alpha", "Alpha", "alpha", "")],
+    "still": [("formats", "Formats", "pick", "formats"),
+              (("width", "Frame size", "int", "1920"), ("height", "×", "int", "1080")),
+              ("alpha", "Alpha", "alpha", "")],
 }
-SECTION_TITLE = {"video": "Video", "audio": "Audio", "sequence": "Image sequences"}
+SECTION_TITLE = {"video": "Video", "audio": "Audio", "sequence": "Image sequences", "still": "Still images"}
 TC_RE = re.compile(r"^\d{1,2}[:;.]\d{2}[:;.]\d{2}[:;.]\d{2,3}$")
 
 
@@ -590,7 +593,7 @@ class PresetsScreen(QWidget):
             return
         src = self.current
         try:
-            body = {k: v for k, v in src.items() if k in ("name", "description", "video", "audio", "sequence")} if src.get("builtin") else self.editor.collect(None)
+            body = {k: v for k, v in src.items() if k in ("name", "description", "video", "audio", "sequence", "still")} if src.get("builtin") else self.editor.collect(None)
         except ValueError as e:
             return self.win.toast(str(e), True)
         body["id"] = None

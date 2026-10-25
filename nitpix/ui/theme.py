@@ -59,6 +59,7 @@ def chip_style(result: str) -> str:
 STYLESHEET = f"""
 QMainWindow, QWidget {{ background: {T['bg']}; color: {T['ink']}; font-family: "Inter Tight"; font-size: 13px; }}
 QLabel {{ background: transparent; }}
+QWidget#brand {{ background: transparent; }}
 QFrame#panel, QWidget#panel {{ background: {T['panel']}; border: 1px solid {T['line']}; border-radius: 6px; }}
 QFrame#rail {{ background: {T['panel']}; border-right: 1px solid {T['line']}; }}
 QPushButton {{ background: {T['panel2']}; color: {T['ink']}; border: 1px solid {T['line2']}; border-radius: 6px; padding: 5px 10px; }}

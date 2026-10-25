@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Draw the nitpix app icon and write it as .icns (macOS) and .png.
 
-The mark: four soft corner marks settling on one coral pixel, on a light squircle.
+The mark: four soft corner marks settling on one coral pixel, on a dark squircle that matches the app.
 Geometry only, no text, so it stays crisp from 16 px to 1024 px.
 
 Usage: .venv/bin/python tools/make_icon.py build/nitpix.icns"""
@@ -16,7 +16,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-INK, CORAL, BG, EDGE = "#777771", "#F2645A", "#F1F1EE", "#D8D8D2"
+INK, CORAL, BG, EDGE = "#B9B9B3", "#F2645A", "#161616", "#2E2E2B"
 
 
 def squircle(rect: QRectF, n: float = 4.6) -> QPainterPath:
@@ -77,7 +77,9 @@ def draw(size: int) -> QImage:
 def main(out: str):
     app = QApplication.instance() or QApplication([])  # noqa: F841
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
-    draw(1024).save(os.path.splitext(out)[0] + ".png")
+    big = draw(1024)
+    big.save(os.path.splitext(out)[0] + ".png")
+    big.save(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "nitpix", "web", "branding", "app-icon.png"))
     with tempfile.TemporaryDirectory() as tmp:
         iconset = os.path.join(tmp, "nitpix.iconset")
         os.mkdir(iconset)

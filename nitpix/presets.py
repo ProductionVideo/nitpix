@@ -5,6 +5,21 @@ Any key left out (or null) is not checked. Lists mean "any of".
 
 BUILTIN_PRESETS = [
     {
+        "id": "led_notchlc_1080p25",
+        "name": "LED content · NotchLC 1080p25 · alpha · 48 kHz stereo",
+        "description": "Default show-content spec. 1920×1080 25p progressive NotchLC in QuickTime MOV, Rec.709 / "
+                       "gamma 2.4, 8-bit or better, alpha channel required (it exposes IMAG through the content). "
+                       "Audio: stereo track (L/R, no LTC), 48 kHz PCM / WAV. Stills: PNG with alpha at 1920×1080. "
+                       "Timecode is not checked.",
+        "video": {
+            "containers": ["mov"], "codecs": ["notchlc"], "width": 1920, "height": 1080, "fps": ["25/1"],
+            "progressive": True, "bit_depth_min": 8, "alpha": "required",
+            "color_primaries": ["bt709"], "color_trc": ["bt709"], "par": "1:1",
+        },
+        "audio": {"codecs": ["pcm"], "sample_rate": 48000, "channels": 2},
+        "still": {"formats": ["png"], "width": 1920, "height": 1080, "alpha": "required"},
+    },
+    {
         "id": "none",
         "name": "Technical checks only (no delivery spec)",
         "description": "Runs integrity, content and sequence checks without comparing to a spec.",

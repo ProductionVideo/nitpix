@@ -172,7 +172,7 @@ def save_preset(p: Project, body: dict) -> tuple[str, list[str]]:
     pid = body.get("id") or ""
     if not pid or pid in builtin_by_id():
         pid = "custom_" + re.sub(r"[^a-z0-9]+", "_", (body.get("name") or "preset").lower()).strip("_")[:40] + f"_{int(time.time()) % 100000}"
-    spec, warnings = vocab.clean_preset({k: v for k, v in body.items() if k in ("description", "video", "audio", "sequence")})
+    spec, warnings = vocab.clean_preset({k: v for k, v in body.items() if k in ("description", "video", "audio", "sequence", "still")})
     p.x("INSERT INTO presets(id,name,spec,builtin,updated) VALUES(?,?,?,0,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, spec=excluded.spec, updated=excluded.updated",
         (pid, body.get("name") or pid, json.dumps(spec), time.time()))
     return pid, warnings

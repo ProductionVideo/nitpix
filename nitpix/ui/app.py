@@ -38,6 +38,7 @@ def brand_lockup(size=24):
     """Shared outlined artwork in the start screen and project sidebar."""
     brand_dir = Path(__file__).resolve().parent.parent / "web" / "branding"
     widget = QWidget()
+    widget.setObjectName("brand")  # transparent in the stylesheet: it sits on the rail's panel colour
     widget.setAccessibleName("nitpix")
     layout = QHBoxLayout(widget)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -46,7 +47,7 @@ def brand_lockup(size=24):
         logo = QSvgWidget(str(brand_dir / asset))
         logo.renderer().setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
         logo.setFixedSize(width, size)
-        logo.setStyleSheet("background: transparent;")
+        logo.setObjectName("brand")
         layout.addWidget(logo)
     layout.addStretch()
     widget.setFixedHeight(size)
@@ -872,7 +873,7 @@ class MainWindow(QMainWindow):
         rows = [("1–6", "Switch view"), ("/", "Search media"), ("↑ ↓", "Move in list"), ("Enter", "Open asset"), ("?", "This help"),
                 ("← →", "Step one frame"), ("⇧← ⇧→", "Step one second"), ("Space", "Play / pause"), ("Home End", "First / last frame"),
                 ("e", "Open in IINA here"), ("g", "Go to timecode / frame"), ("i o", "Set in / out"), ("b", "Bookmark"), ("n", "Add note"),
-                ("[ ]", "Previous / next finding"), ("j k", "Focus next / previous finding"), ("1 2 3 4", "Pass / Issue / Warning / N/A (review)"),
+                ("[ ]", "Previous / next marker (finding or note)"), ("j k", "Focus next / previous finding"), ("1 2 3 4", "Pass / Issue / Warning / N/A (review)"),
                 ("0", "Clear decision"), (", .", "Previous / next asset"), ("a r", "Approve / reject asset"), ("Esc", "Back to media list")]
         html = "<table cellpadding=4>" + "".join(f"<tr><td style='font-family:IBM Plex Mono;color:{theme.T['muted']}'>{k}</td><td>{v}</td></tr>" for k, v in rows) + "</table>"
         QMessageBox.information(self, "Keyboard shortcuts", html)

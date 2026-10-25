@@ -148,6 +148,21 @@ class Screens(unittest.TestCase):
         img = rv.timeline.grab().toImage()
         self.assertGreater(img.width(), 100)
 
+    def test_markers_jump_across_findings_and_notes(self):
+        self.win.show_asset(self.aid)
+        rv = self.win.review
+        rv.seek(50)
+        self.key("b")                                         # a bookmark at 50
+        rv.seek(0)
+        self.key("]")
+        self.assertEqual((rv.frame, rv.tabs.currentIndex()), (10, 0))   # the black segment (finding)
+        self.key("]")
+        self.assertEqual((rv.frame, rv.tabs.currentIndex()), (50, 1))   # then the bookmark (notes tab)
+        self.key("]")
+        self.assertEqual(rv.frame, 10)                                  # wraps round
+        self.key("[")
+        self.assertEqual(rv.frame, 50)
+
     def test_note_form_saves(self):
         self.win.show_asset(self.aid)
         rv = self.win.review

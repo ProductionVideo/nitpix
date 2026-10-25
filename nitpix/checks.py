@@ -673,24 +673,37 @@ def sequence_findings(seq: dict, first_meta: dict | None, preset: dict, settings
 
 def still_findings(hdr: dict, meta: dict | None, preset: dict, settings: dict) -> list[dict]:
     b = Builder(None)
+    ps = preset.get("still") or {}
     b.add("integrity.zero_byte", "integrity", "pass", "File has data", measured=_size(hdr.get("size")))
     if hdr.get("ok") is False:
         b.add("integrity.readable", "integrity", "fail", "Image header invalid", detail=hdr.get("error"))
     else:
         b.add("integrity.readable", "integrity", "pass", "Image readable",
               measured=(meta or {}).get("container_long") or hdr.get("format"))
+    fmt = hdr.get("format")
+    if fmt and ps.get("formats"):
+        _spec(b, "format.container", "format", "Image format", fmt, ps["formats"], field="formats")
     w = hdr.get("width") or ((meta or {}).get("video_streams") or [{}])[0].get("width")
     h = hdr.get("height") or ((meta or {}).get("video_streams") or [{}])[0].get("height")
     if w:
-        b.add("format.resolution", "format", "info", "Resolution", measured=f"{w}×{h}")
+        exp = f"{ps['width']}×{ps['height']}" if ps.get("width") and ps.get("height") else None
+        res = "info" if not exp else ("pass" if (w, h) == (ps["width"], ps["height"]) else "fail")
+        b.add("format.resolution", "format", res, "Resolution", measured=f"{w}×{h}", expected=exp)
         b.add("format.orientation", "format", "info", "Orientation",
               measured="portrait" if h > w else ("square" if h == w else "landscape"))
     v = ((meta or {}).get("video_streams") or [None])[0]
+    al = hdr.get("alpha") if hdr.get("alpha") is not None else (v.get("alpha") if v else None)
+    if al is not None:
+        mode = ps.get("alpha", "any")
+        res = "info" if mode == "any" else (("pass" if al else "fail") if mode == "required" else ("fail" if al else "pass"))
+        b.add("colour.alpha", "colour", res, "Alpha channel", measured="present" if al else "none",
+              expected={"required": "alpha required", "forbidden": "no alpha"}.get(mode))
     if v:
         b.add("colour.bit_depth", "colour", "info", "Bit depth", measured=f"{v.get('bit_depth')}-bit ({v.get('pix_fmt')})")
-        b.add("colour.alpha", "colour", "info", "Alpha channel", measured="present" if v.get("alpha") else "none")
         b.add("colour.tags", "colour", "info", "Colour metadata",
               measured=f"primaries {v.get('color_primaries') or '—'} · transfer {v.get('color_trc') or '—'}")
+    if ps:
+        b.add("spec.preset", "spec", "info", "Compared against delivery preset", measured=preset.get("name"))
     return b.items
 
 

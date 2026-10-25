@@ -268,12 +268,14 @@ PRESET_FIELDS = {
               "color_space": "color_space"},
     "audio": {"codecs": "audio_codecs"},
     "sequence": {"formats": "formats", "bit_depth": "bit_depth"},
+    "still": {"formats": "formats"},
 }
 PRESET_NUMBERS = {
     "video": {"width": int, "height": int, "bit_depth_min": int, "min_duration": float, "max_duration": float},
     "audio": {"sample_rate": int, "channels": int, "loudness_target": float, "loudness_tolerance": float,
               "true_peak_max": float},
     "sequence": {"width": int, "height": int, "start_frame": int, "padding": int},
+    "still": {"width": int, "height": int},
 }
 _TC_RE = re.compile(r"^\d{1,2}[:;.]\d{2}[:;.]\d{2}[:;.]\d{2,3}$")
 
