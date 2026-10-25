@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Draw the nitpix app icon and write it as .icns (macOS) and .png.
 
-The mark: one tiny coral pixel, given space by four quiet inspection corners.
+The mark: four soft corner marks settling on one coral pixel, on a light squircle.
 Geometry only, no text, so it stays crisp from 16 px to 1024 px.
 
 Usage: .venv/bin/python tools/make_icon.py build/nitpix.icns"""
@@ -51,21 +51,25 @@ def draw(size: int) -> QImage:
         p.setPen(QPen(QColor(EDGE), max(1.0, s * 0.003)))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(shape)
-    # Quiet corners leave the saturated pixel as the only focal point.
-    # Snap to device pixels and preserve a 2 px centre at favicon sizes.
-    lo, hi = round(s * 0.28), round(s * 0.72)
-    arm, stroke = max(2, round(s * 0.125)), max(1, round(s * 0.033))
+    # Four open corner marks with round ends and a round coral dot: a viewfinder that has
+    # settled on one pixel. Soft shapes, nothing sharp or badge-like.
+    lo, hi = s * 0.30, s * 0.70
+    arm, stroke = s * 0.11, max(1.5, s * 0.042)
+    pen = QPen(QColor(INK), stroke)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    for cx, dx in ((lo, 1), (hi, -1)):
+        for cy, dy in ((lo, 1), (hi, -1)):
+            corner = QPainterPath(QPointF(cx + dx * arm, cy))
+            corner.lineTo(QPointF(cx, cy))
+            corner.lineTo(QPointF(cx, cy + dy * arm))
+            p.drawPath(corner)
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor(INK))
-    for x in (lo, hi - arm):
-        for y in (lo, hi - arm):
-            vx = x if x == lo else hi - stroke
-            hy = y if y == lo else hi - stroke
-            p.drawRect(QRectF(x, hy, arm, stroke))
-            p.drawRect(QRectF(vx, y, stroke, arm))
-    pixel = max(2, round(s * 0.0625))
     p.setBrush(QColor(CORAL))
-    p.drawRect(QRectF((size - pixel) // 2, (size - pixel) // 2, pixel, pixel))
+    r = max(1.5, s * 0.052)
+    p.drawEllipse(QPointF(s / 2, s / 2), r, r)
     p.end()
     return img
 

@@ -205,3 +205,7 @@ Tests:
 - `tests/test_vocab.py`, `test_checks.py`, `test_store.py`, `test_server.py` and `test_web.py` cover preset matching, rules, settings, the API (including a real scan end to end) and the UI/vocabulary contract.
 
 Fonts are Inter Tight and IBM Plex Mono, both under the SIL Open Font License; the licences are in `nitpix/web/fonts`.
+
+## Licence
+
+nitpix is free software under the MIT licence (see `LICENSE`). It is built by people who QC media for a living and shaped by what breaks in real deliveries; issues with sample files and pull requests are welcome, see `CONTRIBUTING.md`.
