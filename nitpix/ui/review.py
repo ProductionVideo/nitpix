@@ -21,6 +21,7 @@ from .. import frames, service
 from ..timecode import frames_to_tc, is_drop_frame_rate, parse_rate, tc_to_frames
 from . import theme
 from .mpvwidget import MpvWidget
+from .playhead import Playhead
 from .timeline import Timeline
 from .widgets import Cluster, ElideLabel, FlowLayout, repolish
 
@@ -225,20 +226,29 @@ class ReviewScreen(QWidget):
         self.session = session
         self.asset = None
         self.ctx = None
-        self.frame = 0
         self.focus_idx = -1
         self.order: list[int] = []   # asset ids, for prev/next
         self.note_draft = None
         self._save_frame = QTimer(self, singleShot=True, interval=1500)
         self._save_frame.timeout.connect(self._persist_frame)
-        # A timeline scrub owns the position until the player reports the frame it asked for, so
-        # late reports of earlier targets cannot pull the playhead back or put a note, bookmark or
-        # in/out point on the wrong frame. It ends when the player reports that frame or says the
-        # last scrub seek is done; the timer is only a backstop for a player that never answers.
-        self._settle = None
-        self._settle_timer = QTimer(self, singleShot=True, interval=3000)
-        self._settle_timer.timeout.connect(self._settle_timeout)
         self._build()
+
+    # The position and the transport live in the Playhead (nitpix/ui/playhead.py), which owns
+    # the requested frame while a scrub settles; these keep the screen's own names for them.
+    @property
+    def frame(self) -> int:
+        return self.playhead.frame
+
+    @frame.setter
+    def frame(self, f: int):
+        self.playhead.frame = f
+
+    @property
+    def _settle(self):
+        return self.playhead.target
+
+    def _settle_timeout(self):
+        self.playhead._settle_timeout()
 
     # ---- layout ---------------------------------------------------------------
     def _build(self):
@@ -293,11 +303,13 @@ class ReviewScreen(QWidget):
         # viewer
         self.viewer_stack = QStackedLayout()
         self.player = MpvWidget()
-        self.player.frame_changed.connect(self._on_player_frame)
         self.player.pause_changed.connect(self._on_pause)
         self.player.file_loaded.connect(self._on_loaded)
-        self.player.scrub_settled.connect(self._on_scrub_settled)
         self.player.error.connect(lambda m: self.status.emit(m, True))
+        self.playhead = Playhead(self.player, lambda: self.viewer_stack.currentWidget() is self.player, self)
+        self.playhead.moved.connect(self._on_moved)
+        self.playhead.pending_changed.connect(lambda _pending: self.ctx and self._update_tc())
+        self.playhead.still_seek.connect(lambda _f: self._show_still())
         self.still = QLabel()
         self.still.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.still.setStyleSheet(f"background: {theme.T['viewer']}; color: {theme.T['muted']};")
@@ -408,10 +420,9 @@ class ReviewScreen(QWidget):
         same = prev and prev["id"] == a["id"]
         self.asset = a
         self.ctx = PosCtx(a)
-        if not same:
-            self._end_settle()
-        if not (keep_frame and same):
-            self.frame = min(a.get("last_frame") or 0, self.ctx.count - 1)
+        keep = keep_frame and same
+        self.playhead.begin(self.ctx.count, None if keep else min(a.get("last_frame") or 0, self.ctx.count - 1), new=not same)
+        if not keep:
             self.focus_idx = -1
             self.note_draft = None
         self._render_header()
@@ -496,16 +507,9 @@ class ReviewScreen(QWidget):
         self.player.seek_frame(self.frame)
 
     # ---- position --------------------------------------------------------------------
-    def _on_player_frame(self, f: int):
-        if not self.ctx:
-            return
-        if self._settle is not None:
-            if f != self._settle:
-                return  # an earlier target arriving late
-            self._end_settle()
-        self.frame = max(0, min(self.ctx.count - 1, f))
+    def _on_moved(self, f: int):
         self._update_tc()
-        self.timeline.set_frame(self.frame)
+        self.timeline.set_frame(f)
         self._save_frame.start()
 
     def _on_pause(self, paused: bool):
@@ -513,8 +517,8 @@ class ReviewScreen(QWidget):
 
     def _update_tc(self):
         self.tc_lab.setText(self.ctx.label(self.frame))
-        if bool(self.tc_lab.property("pending")) != (self._settle is not None):
-            self.tc_lab.setProperty("pending", self._settle is not None)  # dimmed until the picture is there
+        if bool(self.tc_lab.property("pending")) != self.playhead.pending:
+            self.tc_lab.setProperty("pending", self.playhead.pending)  # dimmed until the picture is there
             repolish(self.tc_lab)
         self.tc_sub.setText(self.ctx.counter(self.frame))
 
@@ -567,78 +571,18 @@ class ReviewScreen(QWidget):
 
     def scrub(self, f: int):
         """Timeline press, drag and release: exact seeks that never block the GUI thread."""
-        if not self.ctx:
-            return
-        if self.viewer_stack.currentWidget() is not self.player or not self.player.loaded:
-            self._end_settle()  # nothing on the player to wait for
-            self.seek(f)
-            return
-        f = max(0, min(self.ctx.count - 1, int(f)))
-        self._settle = f
-        self._settle_timer.start()
-        self.frame = f
-        self._update_tc()
-        self.timeline.set_frame(f)
-        self.player.scrub_to(f)
-        self._save_frame.start()
-
-    def _end_settle(self):
-        self._settle_timer.stop()
-        if self._settle is not None:
-            self._settle = None
-            if self.ctx:
-                self._update_tc()
-
-    def _on_scrub_settled(self):
-        """mpv has carried out the last scrub seek: from here its position is the truth again (it can
-        differ from the target only if the file is shorter than its recorded frame count)."""
-        if self._settle is not None:
-            self._end_settle()
-            if self.player.frame != self.frame:
-                self._on_player_frame(self.player.frame)
-
-    def _settle_timeout(self):
-        if self.player.scrub_pending():
-            self._settle_timer.start()
-            return
-        self._end_settle()
-        self._on_player_frame(self.player.frame)  # take the last position the player reported
+        self.playhead.scrub(f)
 
     def seek(self, f: int):
-        if not self.ctx:
-            return
-        if self._settle is not None:  # behind a scrub that is still settling: same ordered path
-            self.scrub(f)
-            return
-        f = max(0, min(self.ctx.count - 1, int(f)))
-        self.frame = f
-        self._update_tc()
-        self.timeline.set_frame(f)
-        if self.viewer_stack.currentWidget() is self.player:
-            self.player.seek_frame(f)
-        else:
-            self._show_still()
-        self._save_frame.start()
+        self.playhead.seek(f)
 
     def step(self, n: int):
-        if self._settle is not None:  # from the frame asked for, not wherever the player has got to
-            self.seek(self.frame + n)
-        elif self.viewer_stack.currentWidget() is self.player and self.player.loaded and abs(n) == 1:
-            self.player.step(n)
-        else:
-            self.seek(self.frame + n)
+        self.playhead.step(n)
 
     def toggle_play(self):
-        if not self.player.loaded:
+        a = self.asset or {}
+        if not self.playhead.toggle_play(looping=a.get("in_frame") is not None and a.get("out_frame") is not None):
             self.status.emit("Nothing playable is loaded", True)
-            return
-        a = self.asset
-        looping = a.get("in_frame") is not None and a.get("out_frame") is not None
-        if self.player.paused and not looping and self.frame >= self.ctx.count - 1:
-            self.seek(0)  # at the end: play again from the top
-            self.player.set_pause(False)
-        else:
-            self.player.set_pause(None)
 
     def _goto(self):
         f = self.ctx.parse(self.tc_in.text()) if self.ctx else None
@@ -1120,4 +1064,5 @@ class ReviewScreen(QWidget):
         return True
 
     def shutdown(self):
+        self.playhead.stop()
         self.player.shutdown()

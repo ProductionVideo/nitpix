@@ -83,7 +83,7 @@ class StationaryTransport(unittest.TestCase):
         for i, f in enumerate(f for f in frames if f < rv.ctx.count):
             rv.frame = f
             if pending_flip:
-                rv._settle = f if i % 2 else None   # dimmed / normal timecode in turn
+                rv.playhead.target = f if i % 2 else None   # dimmed / normal timecode in turn
             rv._update_tc()
             self.settle()
             with self.subTest(asset=key, width=width, frame=f, tc=rv.tc_lab.text(), counter=rv.tc_sub.text()):
@@ -91,7 +91,7 @@ class StationaryTransport(unittest.TestCase):
                 for lab in (rv.tc_lab, rv.tc_sub):   # nothing clipped
                     self.assertLessEqual(lab.sizeHint().width(), lab.width())
             hints.append(max(rv.tc_lab.sizeHint().width(), rv.tc_sub.sizeHint().width()))
-        rv._settle = None
+        rv.playhead.target = None
         return base, max(hints)
 
     def test_controls_do_not_move_while_the_counter_runs(self):
