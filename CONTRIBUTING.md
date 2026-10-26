@@ -17,7 +17,7 @@ Open an issue with:
 ## Working on the code
 
 ```bash
-uv sync                                   # Python 3.13 + PySide6 + python-mpv + reportlab
+uv sync                                   # Python 3.14 + PySide6 + python-mpv + reportlab
 brew install ffmpeg mpv                   # macOS; see README for other platforms
 .venv/bin/nitpix                          # run the app
 python3 -W ignore -m unittest discover tests      # backend tests (no Qt needed)

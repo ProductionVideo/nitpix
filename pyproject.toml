@@ -4,18 +4,18 @@ version = "0.5.6"
 license = "MIT"
 license-files = ["LICENSE"]
 description = "nitpix: delivery QC for video, audio, stills and image sequences, with frame-accurate review on embedded libmpv."
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.13,<3.16"
 dependencies = [
-    "PySide6>=6.8",
-    "python-mpv>=1.0.7",
-    "reportlab>=3.6",
+    "PySide6>=6.12",
+    "python-mpv>=1.0.8",
+    "reportlab>=5.1",
 ]
 
 [project.scripts]
 nitpix = "nitpix.__main__:main"
 
 [tool.uv]
-# PySide6 publishes wheels up to Python 3.13; pin the interpreter uv creates.
+# Development and the app bundle use the interpreter in .python-version (uv-managed).
 python-preference = "managed"
 
 [build-system]

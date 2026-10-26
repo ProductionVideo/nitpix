@@ -35,7 +35,7 @@ nitpix checks GitHub for a newer release when it starts (at most once a day, qui
 ## Running
 
 ```bash
-uv sync                       # Python 3.13 + PySide6 + python-mpv + reportlab into .venv
+uv sync                       # Python 3.14 + PySide6 + python-mpv + reportlab into .venv
 brew install ffmpeg mpv       # ffmpeg/ffprobe for scanning, libmpv for playback
 .venv/bin/nitpix              # or double-click "nitpix.command"; `python -m nitpix` also works
 .venv/bin/nitpix --web        # the legacy browser UI

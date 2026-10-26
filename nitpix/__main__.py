@@ -11,8 +11,8 @@
 import argparse
 import sys
 
-if sys.version_info < (3, 11):
-    sys.exit("nitpix needs Python 3.11 or newer.")
+if sys.version_info < (3, 13):
+    sys.exit("nitpix needs Python 3.13 or newer.")
 
 
 def main():
