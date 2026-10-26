@@ -24,6 +24,8 @@ def run(media: str | None = None) -> dict:
         out["pyside6"] = f"missing: {e}"
     if libmpv.available():
         out["libmpv"]["decode"] = _decode_check(media)
+    from . import scene
+    out["scene_importer"] = scene.selfcheck()
     return out
 
 

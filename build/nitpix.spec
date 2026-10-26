@@ -24,7 +24,7 @@ a = Analysis(
     pathex=[ROOT],
     binaries=binaries,
     datas=datas,
-    hiddenimports=collect_submodules("nitpix") + ["mpv", "reportlab"],
+    hiddenimports=collect_submodules("nitpix") + ["mpv", "reportlab", "assimp_py"],
     excludes=["PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick", "PySide6.QtQml",
               "PySide6.QtQuick", "PySide6.QtQuick3D", "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtMultimedia",
               "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf", "PySide6.QtLocation", "PySide6.QtBluetooth",

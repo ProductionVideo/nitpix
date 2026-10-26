@@ -1,0 +1,44 @@
+# nitpix importer edge cases
+mtllib edge.mtl
+o Screen
+v -1 0 0
+v 1 0 0
+v 1 1 0
+v -1 1 0
+vt 0 0
+vt 1 0
+vt 1 1
+vt 0 1
+usemtl LED
+f 1/1 2/2 3/3 4/4
+o Screen
+v 2 0 0
+v 4 0 0
+v 4 1 0
+v 2 1 0
+vt 0.5 0
+vt 1 0
+vt 1 1
+vt 0.5 1
+usemtl LED
+f 5/5 6/6 7/7 8/8
+o Bare
+v 0 2 0
+v 1 2 0
+v 1 3 0
+f 9 10 11
+o Hex
+v 0 -1 0
+v 1 -1 0
+v 1.5 -0.5 0
+v 1 0 0
+v 0 0 0
+v -0.5 -0.5 0
+vt 0.2 0
+vt 0.8 0
+vt 1 0.5
+vt 0.8 1
+vt 0.2 1
+vt 0 0.5
+usemtl LED
+f 12/9 13/10 14/11 15/12 16/13 17/14
