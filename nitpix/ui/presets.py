@@ -517,22 +517,33 @@ class PresetsScreen(QWidget):
             return
         self._show(self._by_id(pid))
 
+    def _editable_default(self, pr: dict | None) -> bool:
+        """The factory default spec is edited in place (saved as this project's own version) until
+        that version exists; after that, edits go to the project's version."""
+        src, own = service.default_spec_ids()
+        return bool(pr) and pr["id"] == src and self._by_id(own) is None
+
     def _show(self, pr: dict | None):
         self.current = pr
         self.dirty = False
         if not pr:
             return
-        builtin = bool(pr.get("builtin"))
+        locked = bool(pr.get("builtin")) and not self._editable_default(pr)
         active = pr["id"] == self.data["active"]
         self.title.setText(pr["name"])
         self.active_chip.setVisible(active)
         self.use_btn.setVisible(not active)
-        self.save_btn.setVisible(not builtin)
+        self.save_btn.setVisible(not locked)
         self.save_btn.setEnabled(False)
-        self.banner.setVisible(builtin)
-        self.del_btn.setEnabled(not builtin)
+        src, own = service.default_spec_ids()
+        mine = self._by_id(own) if pr["id"] == src else None
+        self.banner.setText(f"This project has its own version of this spec, “{mine['name']}”. Edit that one, or Duplicate this one to "
+                            "start again from the factory settings." if mine else
+                            "Built-in specs are read-only. Duplicate this spec to customise it.")
+        self.banner.setVisible(locked)
+        self.del_btn.setEnabled(not pr.get("builtin"))
         self.editor.load(pr)
-        self.editor.setEnabled(not builtin)
+        self.editor.setEnabled(not locked)
 
     def _dirty(self):
         self.dirty = True
@@ -551,8 +562,8 @@ class PresetsScreen(QWidget):
     def _use(self):
         if not self.current:
             return
-        if self.dirty and not self.current.get("builtin"):  # using a preset must not throw away its edits
-            if not self._save(quiet=True):
+        if self.dirty and (not self.current.get("builtin") or self._editable_default(self.current)):
+            if not self._save(quiet=True):  # using a spec must not throw away its edits
                 return
         service.update_settings(self.win.session.project, {"preset_id": self.current["id"]})
         self.win.refresh_rail()
@@ -560,12 +571,16 @@ class PresetsScreen(QWidget):
         self._recheck_all(f"Spec: {self.current['name']}")
 
     def _save(self, quiet=False) -> bool:
-        if not self.current or self.current.get("builtin"):
+        default = self._editable_default(self.current)
+        if not self.current or (self.current.get("builtin") and not default):
             return False
         p = self.win.session.project
         try:
             body = self.editor.collect(self.current["id"])
-            pid, warnings = service.save_preset(p, body)
+            if default:  # first save of the factory default: this project's own version, active if the default was
+                pid, warnings, _ = service.save_default_spec(p, body)
+            else:
+                pid, warnings = service.save_preset(p, body)
         except ValueError as e:
             self.win.toast(str(e), True)
             return False
@@ -593,7 +608,8 @@ class PresetsScreen(QWidget):
             return
         src = self.current
         try:
-            body = {k: v for k, v in src.items() if k in ("name", "description", "video", "audio", "sequence", "still")} if src.get("builtin") else self.editor.collect(None)
+            locked = src.get("builtin") and not self._editable_default(src)
+            body = {k: v for k, v in src.items() if k in ("name", "description", "video", "audio", "sequence", "still")} if locked else self.editor.collect(None)
         except ValueError as e:
             return self.win.toast(str(e), True)
         body["id"] = None

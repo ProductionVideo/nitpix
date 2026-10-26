@@ -15,7 +15,7 @@ from . import vocab
 from .iina import IINABridge
 from .presets import builtin_by_id
 from .scanner import JobManager, active_preset, all_presets
-from .store import Project, remember_project
+from .store import DEFAULT_SETTINGS, Project, remember_project
 
 LIST_COLS = """a.id, a.kind, a.name, a.dir, a.path, a.ext, a.size, a.container, a.vcodec, a.acodec, a.width, a.height,
  a.fps, a.fps_float, a.duration, a.frames, a.start_tc, a.audio_channels, a.sample_rate, a.bit_depth, a.chroma,
@@ -176,6 +176,26 @@ def save_preset(p: Project, body: dict) -> tuple[str, list[str]]:
     p.x("INSERT INTO presets(id,name,spec,builtin,updated) VALUES(?,?,?,0,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, spec=excluded.spec, updated=excluded.updated",
         (pid, body.get("name") or pid, json.dumps(spec), time.time()))
     return pid, warnings
+
+
+def default_spec_ids() -> tuple[str, str]:
+    """The factory default spec new projects start with, and the id of a project's own edited
+    version of it."""
+    src = DEFAULT_SETTINGS["preset_id"]
+    return src, f"project_{src}"
+
+
+def save_default_spec(p: Project, body: dict) -> tuple[str, list[str], bool]:
+    """Save edits made to the factory default spec as this project's own version: created on the
+    first save, updated in place after that, the factory definition untouched. If the factory
+    default is the active spec it hands over to the saved version. Invalid fields raise before
+    anything is written. Returns (id, warnings, made_active)."""
+    src, own = default_spec_ids()
+    pid, warnings = save_preset(p, {**body, "id": own})
+    made_active = p.settings.get("preset_id") == src
+    if made_active:
+        update_settings(p, {"preset_id": pid})
+    return pid, warnings, made_active
 
 
 def delete_preset(p: Project, pid: str):
