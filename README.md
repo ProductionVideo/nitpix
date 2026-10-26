@@ -224,7 +224,7 @@ Tests:
 - `tests/test_iinfo.py` covers IINfo's file fingerprint (checked against IINfo's own JavaScript), frame mapping at NTSC rates, merge rules and round trips.
 - `tests/test_vocab.py`, `test_checks.py`, `test_store.py`, `test_server.py` and `test_web.py` cover preset matching, rules, settings, the API (including a real scan end to end) and the UI/vocabulary contract.
 
-Fonts are Inter Tight and IBM Plex Mono, both under the SIL Open Font License; the licences are in `nitpix/web/fonts`.
+Fonts are Inter (the desktop app), Inter Tight (PDF reports and the legacy web UI) and IBM Plex Mono, all under the SIL Open Font License; the licences are in `nitpix/web/fonts`.
 
 ## Licence
 

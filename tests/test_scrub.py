@@ -420,6 +420,28 @@ class Review(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_QT, "PySide6 not installed in this interpreter")
+class Fonts(unittest.TestCase):
+    def test_bundled_inter_and_a_steady_timecode(self):
+        from PySide6.QtGui import QFont, QFontDatabase, QFontInfo, QFontMetricsF
+        app = QApplication.instance() or QApplication([])
+        theme.load_fonts()
+        self.assertIn("Inter", QFontDatabase.families())
+        app.setStyleSheet(theme.STYLESHEET)
+        s = service.Session()
+        s.project = Project(tempfile.mkdtemp(prefix="nitpix fonts ") + "/f.nitpix")
+        rv = ReviewScreen(s)
+        rv.tc_lab.setProperty("pending", True)   # restyled while scrubbing: the digits must stay tabular
+        rv.tc_lab.style().unpolish(rv.tc_lab)
+        rv.tc_lab.style().polish(rv.tc_lab)
+        f = rv.tc_lab.font()
+        self.assertEqual(QFontInfo(f).family(), "Inter")
+        m = QFontMetricsF(f)
+        self.assertEqual(len({round(m.horizontalAdvance(d), 2) for d in "0123456789"}), 1)
+        rv.deleteLater()
+        s.project.close()
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not installed in this interpreter")
 class Startup(unittest.TestCase):
     def test_player_starts_under_a_non_c_locale(self):
         """QApplication takes LC_NUMERIC from the environment; libmpv refuses a non-C one and

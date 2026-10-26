@@ -315,6 +315,7 @@ class ReviewScreen(QWidget):
         tcl.setSpacing(0)
         self.tc_lab = QLabel("00:00:00:00")
         self.tc_lab.setProperty("tc", True)
+        self.tc_lab.setFont(theme.tabular(self.tc_lab.font()))
         self.tc_sub = QLabel()
         self.tc_sub.setFont(theme.mono(11))
         self.tc_sub.setProperty("muted", True)

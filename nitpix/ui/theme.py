@@ -28,7 +28,7 @@ REVIEW_ORDER = ["unreviewed", "in_review", "approved", "approved_notes", "reject
 
 
 def load_fonts():
-    for f in ("InterTight_400Regular", "InterTight_500Medium", "InterTight_600SemiBold", "InterTight_700Bold",
+    for f in ("Inter_400Regular", "Inter_500Medium", "Inter_600SemiBold", "Inter_700Bold",
               "IBMPlexMono_400Regular", "IBMPlexMono_500Medium"):
         p = os.path.join(FONT_DIR, f + ".ttf")
         if os.path.exists(p):
@@ -36,8 +36,14 @@ def load_fonts():
 
 
 def sans(size=13, weight=QFont.Weight.Normal) -> QFont:
-    f = QFont("Inter Tight", size)
+    f = QFont("Inter", size)
     f.setWeight(weight)
+    return f
+
+
+def tabular(f: QFont) -> QFont:
+    """Same-width digits, so a running timecode does not shift sideways."""
+    f.setFeature(QFont.Tag("tnum"), 1)
     return f
 
 
@@ -57,7 +63,7 @@ def chip_style(result: str) -> str:
 
 
 STYLESHEET = f"""
-QMainWindow, QWidget {{ background: {T['bg']}; color: {T['ink']}; font-family: "Inter Tight"; font-size: 13px; }}
+QMainWindow, QWidget {{ background: {T['bg']}; color: {T['ink']}; font-family: "Inter"; font-size: 13px; }}
 QLabel {{ background: transparent; }}
 QWidget#brand {{ background: transparent; }}
 QFrame#panel, QWidget#panel {{ background: {T['panel']}; border: 1px solid {T['line']}; border-radius: 6px; }}
@@ -112,7 +118,7 @@ QLabel[faint="true"] {{ color: {T['faint']}; }}
 QLabel[mono="true"] {{ font-family: "IBM Plex Mono"; font-size: 12px; }}
 QLabel[h1="true"] {{ font-size: 18px; font-weight: 600; }}
 QLabel[h2="true"] {{ font-size: 15px; font-weight: 600; }}
-QLabel[tc="true"] {{ font-family: "IBM Plex Mono"; font-size: 22px; font-weight: 500; }}
+QLabel[tc="true"] {{ font-family: "Inter"; font-size: 22px; font-weight: 500; }}
 QLabel[tc="true"][pending="true"] {{ color: {T['muted']}; }}
 QMenu {{ background: {T['panel']}; border: 1px solid {T['line2']}; }} QMenu::item:selected {{ background: {T['sel']}; }}
 QCheckBox, QRadioButton {{ background: transparent; }}
