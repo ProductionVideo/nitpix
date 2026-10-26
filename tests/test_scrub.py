@@ -56,6 +56,9 @@ class FakeMpv:
     def loadfile(self, *a, **k):
         self.sent.append(("sync", ("loadfile", *a)))
 
+    def terminate(self):
+        self.sent.append(("sync", ("terminate",)))
+
 
 def seek_time(frame, rate=Fraction(25)):
     """The quarter-frame-early rule, as the player applies it."""
@@ -417,6 +420,117 @@ class Review(unittest.TestCase):
         rv.seek(12)
         rv.step(1)
         self.assertEqual((rv.frame, rv._settle), (13, None))
+
+    # ---- characterisation: written against the review screen before the transport moved out ----
+    def test_a_refused_scrub_is_reported_and_shows_where_the_player_is(self):
+        """A seek mpv refuses settles at once: the playhead goes back to the frame on screen
+        rather than claiming the one asked for (no wait for the backstop)."""
+        rv, said = self.rv, []
+        rv.status.connect(lambda text, err: said.append((text, err)))
+        self.report(5)
+        self.m.fail_next = True
+        self.mouse(QEvent.Type.MouseButtonPress, self.x_of(30))
+        self.assertTrue(said and "refused" in said[0][0] and said[0][1])
+        self.assertEqual((rv.frame, rv._settle, bool(rv.tc_lab.property("pending"))), (5, None, False))
+        self.mouse(QEvent.Type.MouseMove, self.x_of(40))              # the next target still goes
+        self.assertEqual((rv.frame, rv._settle, self.seeks()), (40, 40, [40]))
+
+    def test_a_note_started_while_pending_goes_on_the_requested_frame(self):
+        rv = self.rv
+        self.drag(10, 60)
+        rv.start_note()
+        self.report(10)                                                # late report of an earlier target
+        self.settle()
+        self.report(60)
+        self.report(61)                                                # then playback moves on
+        rv.note_text.setPlainText("flash")
+        rv.save_note()
+        self.assertEqual([(n["kind"], n["frame"]) for n in rv.asset["notes"]], [("note", 60)])
+
+    def test_space_at_the_end_replays_from_the_top_unless_looping(self):
+        rv = self.rv
+        rv.seek(99)
+        rv.toggle_play()
+        self.assertEqual(self.seeks(), [99, 0])
+        self.assertFalse(self.m.pause)
+        self.m.pause, self.m.sent = True, []
+        rv.set_inout("in")                                             # in at 99... out at 99: a loop
+        rv.set_inout("out")
+        rv.seek(99)
+        rv.toggle_play()                                               # looping: just play
+        self.assertEqual(self.seeks(), [99])
+        self.assertFalse(self.m.pause)
+
+    def test_nothing_playable_says_so(self):
+        rv, said = self.rv, []
+        rv.status.connect(lambda text, err: said.append((text, err)))
+        rv.player.loaded = False
+        rv.toggle_play()
+        self.assertEqual(said, [("Nothing playable is loaded", True)])
+
+    def test_still_pictures_seek_and_step_without_the_player(self):
+        rv = self.rv
+        rv.viewer_stack.setCurrentWidget(rv.still)                     # missing media / no libmpv
+        rv.seek(30)
+        rv.step(1)
+        rv.scrub(40)
+        self.assertEqual((rv.frame, rv._settle, rv.timeline.frame), (40, None, 40))
+        self.assertEqual(self.m.sent, [])
+        self.assertTrue(rv.still.text())                               # the fallback said why there is no picture
+
+    def test_last_frame_is_saved_and_restored_within_the_asset(self):
+        rv, p = self.rv, self.session.project
+        rv.seek(42)
+        self.assertTrue(rv._save_frame.isActive())
+        rv._save_frame.timeout.emit()
+        self.assertEqual(p.asset(self.aid)["last_frame"], 42)
+        self.open(self.bid)
+        self.assertEqual(rv.frame, 0)
+        self.open(self.aid)
+        self.assertEqual(rv.frame, 42)
+        p.update_asset(self.bid, last_frame=500)                       # beyond b's 50 frames
+        self.open(self.bid)
+        self.assertEqual(rv.frame, 49)
+
+    def test_refresh_keeps_a_pending_scrub(self):
+        rv = self.rv
+        self.drag(10, 60)
+        rv.refresh()
+        self.report(10)
+        self.assertEqual((rv.frame, rv._settle), (60, 60))
+
+    def test_dragging_while_playing_never_pauses(self):
+        rv = self.rv
+        rv.player._on_prop("pause", False)
+        self.drag(10, 40, 70)
+        self.answer_all()
+        self.assertFalse([a for _, a in self.m.sent if a and a[0] in ("set", "cycle")])
+        self.assertFalse(rv.player.paused)
+
+    def test_held_arrow_steps_one_frame_each_and_waits_for_the_player(self):
+        rv = self.rv
+        for _ in range(5):                                             # key auto-repeat
+            rv.step(1)
+        self.assertEqual(self.m.sent, [("sync", ("frame-step",))] * 5)
+        self.assertEqual(rv.frame, 0)                                  # the position follows the player's reports
+        self.report(5)
+        self.assertEqual(rv.frame, 5)
+        rv.step(25)                                                    # ⇧→: an exact seek of a second
+        self.assertEqual(self.seeks(), [30])
+
+    def test_go_to_is_an_exact_seek(self):
+        rv = self.rv
+        rv.tc_in.setText("00:00:02:10")
+        rv._goto()
+        self.assertEqual((rv.frame, self.seeks(), rv.tc_in.text()), (60, [60], ""))
+
+    def test_shutdown_with_a_scrub_pending(self):
+        rv = self.rv
+        self.drag(10, 60)
+        rv.shutdown()
+        self.assertIsNone(rv.player.m)
+        rv._settle_timeout()                                           # a backstop firing after shutdown is harmless
+        self.assertIsNone(rv._settle)
 
 
 @unittest.skipUnless(HAS_QT, "PySide6 not installed in this interpreter")
