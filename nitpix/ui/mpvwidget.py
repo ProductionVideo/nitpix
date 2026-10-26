@@ -19,6 +19,7 @@ unanswered, seeks, steps, pause changes and OSD text join the same ordered async
 """
 from __future__ import annotations
 
+import locale
 import os
 import sys
 from fractions import Fraction
@@ -127,6 +128,11 @@ class MpvWidget(QOpenGLWidget):
         self._seek_id = None       # the newest seek sent on the lane, then how far mpv has got with it:
         self._seek_state = None    # "sent" -> "acked" (queued in mpv) -> "started" (SEEK) -> "done" (PLAYBACK_RESTART)
         if libmpv.available() and not os.environ.get("NITPIX_NO_MPV"):  # tests build the UI without a player
+            # libmpv refuses to start unless LC_NUMERIC is "C" (python-mpv then crashes on the null
+            # handle). python-mpv sets it on import, but QApplication resets it from the environment,
+            # so a launch from a terminal with LANG=en_GB.UTF-8 crashed at startup. Qt formats numbers
+            # through QLocale and Python through its own code, so neither depends on this.
+            locale.setlocale(locale.LC_NUMERIC, "C")
             self.m = libmpv.mpv.MPV(vo="libmpv", keep_open="yes", pause=True, hr_seek="yes", hwdec=HWDEC,
                                    resume_playback=False, idle="yes", osd_level=1, osd_duration=1500,
                                    input_default_bindings=False, input_vo_keyboard=False, ytdl=False,

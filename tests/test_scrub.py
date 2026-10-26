@@ -7,6 +7,8 @@ import os as _os, tempfile as _tempfile; _os.environ.setdefault("NITPIX_STATE_DI
 import importlib.util
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from concurrent.futures import Future
@@ -415,6 +417,24 @@ class Review(unittest.TestCase):
         rv.seek(12)
         rv.step(1)
         self.assertEqual((rv.frame, rv._settle), (13, None))
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not installed in this interpreter")
+class Startup(unittest.TestCase):
+    def test_player_starts_under_a_non_c_locale(self):
+        """QApplication takes LC_NUMERIC from the environment; libmpv refuses a non-C one and
+        python-mpv then crashed on the null handle (a launch from a UK-locale terminal)."""
+        from nitpix import libmpv
+        if not libmpv.available():
+            self.skipTest("libmpv not installed")
+        env = {k: v for k, v in os.environ.items() if k != "NITPIX_NO_MPV"}
+        env.update(LANG="en_GB.UTF-8", LC_ALL="", QT_QPA_PLATFORM="offscreen", PYTHONDONTWRITEBYTECODE="1")
+        # imported before QApplication exists, as the app does: python-mpv's own locale fix runs first
+        code = ("from nitpix.ui.mpvwidget import MpvWidget; from PySide6.QtWidgets import QApplication; app = QApplication([]); "
+                "w = MpvWidget(); assert w.m is not None; w.shutdown(); print('ok')")
+        r = subprocess.run([sys.executable, "-B", "-c", code], env=env, capture_output=True, text=True, timeout=60,
+                           cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "ok"), r.stderr[-500:])
 
 
 if __name__ == "__main__":
