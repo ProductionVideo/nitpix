@@ -253,7 +253,7 @@ class PresetEditor(QWidget):
         grid.setColumnMinimumWidth(0, 120)
         row = 0
         self.name = QLineEdit()
-        self.name.setPlaceholderText("Preset name")
+        self.name.setPlaceholderText("Spec name")
         self.desc = QLineEdit()
         self.desc.setPlaceholderText("What this delivery is for")
         for lab, w in (("Name", self.name), ("Description", self.desc)):
@@ -373,7 +373,7 @@ class PresetEditor(QWidget):
         if bad:
             bad[0].setFocus()
             raise ValueError("Fix the highlighted fields before saving.")
-        out = {"id": pid, "name": self.name.text().strip() or "Custom preset", "description": self.desc.text().strip()}
+        out = {"id": pid, "name": self.name.text().strip() or "Custom spec", "description": self.desc.text().strip()}
         for sec in FIELDS:
             o = {}
             for (s, k), w in self.widgets.items():
@@ -420,7 +420,7 @@ class PresetsScreen(QWidget):
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
-        h = QLabel("Delivery presets")
+        h = QLabel("Delivery specs")
         h.setProperty("h1", True)
         ll.addWidget(h)
         self.list = QListWidget()
@@ -429,8 +429,8 @@ class PresetsScreen(QWidget):
         self.list.currentItemChanged.connect(self._pick)
         ll.addWidget(self.list, 1)
         lrow = QHBoxLayout()
-        lrow.addWidget(btn("+ New", "Start a blank custom preset", self._new))
-        self.dup_btn = btn("Duplicate", "Copy this preset so it can be edited", self._dup)
+        lrow.addWidget(btn("+ New", "Start a blank custom spec", self._new))
+        self.dup_btn = btn("Duplicate", "Copy this spec so it can be edited", self._dup)
         lrow.addWidget(self.dup_btn)
         self.del_btn = btn("Delete", "", self._delete, ghost=True)
         lrow.addWidget(self.del_btn)
@@ -451,10 +451,10 @@ class PresetsScreen(QWidget):
         hrow.addWidget(self.active_chip)
         self.use_btn = btn("Use for this project", "Re-evaluates stored measurements instantly, no re-decode", self._use, primary=True)
         hrow.addWidget(self.use_btn)
-        self.save_btn = btn("Save preset", "", self._save, primary=True)
+        self.save_btn = btn("Save spec", "", self._save, primary=True)
         hrow.addWidget(self.save_btn)
         rl.addLayout(hrow)
-        self.banner = QLabel("Built-in presets are read-only. Duplicate this preset to customise it.")
+        self.banner = QLabel("Built-in specs are read-only. Duplicate this spec to customise it.")
         self.banner.setProperty("banner", True)
         self.banner.setWordWrap(True)
         rl.addWidget(self.banner)
@@ -510,7 +510,7 @@ class PresetsScreen(QWidget):
         pid = it.data(Qt.ItemDataRole.UserRole)
         if self.current and pid == self.current["id"]:
             return
-        if self.dirty and QMessageBox.question(self, "Unsaved changes", "Discard the changes to this preset?") != QMessageBox.StandardButton.Yes:
+        if self.dirty and QMessageBox.question(self, "Unsaved changes", "Discard the changes to this spec?") != QMessageBox.StandardButton.Yes:
             self.list.blockSignals(True)
             self.list.setCurrentItem(prev)
             self.list.blockSignals(False)
@@ -557,7 +557,7 @@ class PresetsScreen(QWidget):
         service.update_settings(self.win.session.project, {"preset_id": self.current["id"]})
         self.win.refresh_rail()
         self.refresh(self.current["id"])
-        self._recheck_all(f"Preset: {self.current['name']}")
+        self._recheck_all(f"Spec: {self.current['name']}")
 
     def _save(self, quiet=False) -> bool:
         if not self.current or self.current.get("builtin"):
@@ -577,13 +577,13 @@ class PresetsScreen(QWidget):
         if quiet:
             return True
         if pid == self.data["active"]:
-            self._recheck_all("Preset saved")
+            self._recheck_all("Spec saved")
         elif not warnings:
-            self.win.toast("Preset saved")
+            self.win.toast("Spec saved")
         return True
 
     def _new(self):
-        pid, _ = service.save_preset(self.win.session.project, {"name": "New delivery preset", "description": ""})
+        pid, _ = service.save_preset(self.win.session.project, {"name": "New delivery spec", "description": ""})
         self.refresh(pid)
         self.editor.name.setFocus()
         self.editor.name.selectAll()
@@ -607,7 +607,7 @@ class PresetsScreen(QWidget):
     def _delete(self):
         if not self.current or self.current.get("builtin"):
             return
-        if QMessageBox.question(self, "Delete preset", f"Delete “{self.current['name']}”?") != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Delete spec", f"Delete “{self.current['name']}”?") != QMessageBox.StandardButton.Yes:
             return
         try:
             service.delete_preset(self.win.session.project, self.current["id"])

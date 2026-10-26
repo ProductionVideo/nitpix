@@ -30,7 +30,7 @@ from .review import ReviewScreen, btn, chip
 from .widgets import ElideLabel, nav_icon, tidy_combo
 
 VIEWS = ["dashboard", "media", "review", "presets", "reports", "settings"]
-VIEW_LABEL = {"dashboard": "Dashboard", "media": "Media", "review": "Review", "presets": "Presets", "reports": "Reports",
+VIEW_LABEL = {"dashboard": "Dashboard", "media": "Media", "review": "Review", "presets": "Specs", "reports": "Reports",
               "settings": "Settings"}
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -251,7 +251,7 @@ class DashboardScreen(QWidget):
         s = p.settings
         self.title.setText(s.get("project_name") or "Untitled delivery")
         pr = self.win.session.preset()
-        self.sub.setText(f"{s.get('client') or 'No client'} · Preset: {pr.get('name') or 'none'}")
+        self.sub.setText(f"{s.get('client') or 'No client'} · Spec: {pr.get('name') or 'none'}")
         while self.kpis.count():
             w = self.kpis.takeAt(0).widget()
             if w:
@@ -418,7 +418,7 @@ class SettingsScreen(QWidget):
         form.addRow("Project name", self.name)
         form.addRow("Client", self.client)
         form.addRow("Reviewer (your name)", self.reviewer)
-        form.addRow("Delivery preset", self.preset)
+        form.addRow("Delivery spec", self.preset)
         form.addRow(QLabel("<b>Analysis</b>"))
         form.addRow("Parallel workers", self.workers)
         form.addRow("", self.content)
@@ -816,7 +816,7 @@ class MainWindow(QMainWindow):
         c = self.rail_collapsed
         if p and not c:
             pr = self.session.preset()
-            self.proj_lab.setText(f"<b>{p.settings.get('project_name')}</b><br><span style='font-size:11px'>Preset: {pr.get('name') or 'none'}</span>")
+            self.proj_lab.setText(f"<b>{p.settings.get('project_name')}</b><br><span style='font-size:11px'>Spec: {pr.get('name') or 'none'}</span>")
         else:
             self.proj_lab.setText("")
         self.proj_lab.setVisible(bool(p) and not c)

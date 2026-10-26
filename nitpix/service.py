@@ -180,7 +180,7 @@ def save_preset(p: Project, body: dict) -> tuple[str, list[str]]:
 
 def delete_preset(p: Project, pid: str):
     if pid in builtin_by_id():
-        raise ValueError("Built-in presets cannot be deleted; duplicate one to customise it.")
+        raise ValueError("Built-in specs cannot be deleted; duplicate one to customise it.")
     p.x("DELETE FROM presets WHERE id=?", (pid,))
     if p.settings.get("preset_id") == pid:
         p.update_settings({"preset_id": "none"})

@@ -180,6 +180,13 @@ class Screens(unittest.TestCase):
         self.assertEqual((n["frame"], n["severity"], n["text"]), (42, "issue", "soft focus"))
         self.assertEqual(rv.asset["qc_result"], "fail")
 
+    def test_delivery_specs_are_called_specs(self):
+        """Renamed from "presets" in 0.5.5: the words people see, not the stored ids."""
+        from nitpix.ui.app import VIEW_LABEL
+        self.assertEqual(VIEW_LABEL["presets"], "Specs")
+        self.win.show_view("presets")
+        self.assertEqual(self.win.presets.save_btn.text(), "Save spec")
+
     def test_presets_editor_round_trip(self):
         self.win.show_view("presets")
         ps = self.win.presets

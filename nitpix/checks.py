@@ -121,7 +121,7 @@ def _spec(b, key, cat, title, measured, expected, ok=None, fmt=lambda x: x, fiel
         ok = measured in exp or (isinstance(measured, str) and any(str(e).lower() == measured.lower() for e in exp))
     b.add(key, cat, "pass" if ok else "fail", title, measured=fmt(measured),
           expected=" or ".join(str(fmt(e)) for e in exp),
-          detail="" if ok else "Does not match the delivery preset.")
+          detail="" if ok else "Does not match the delivery spec.")
 
 
 def _fmt_fps(s):
@@ -168,7 +168,7 @@ def media_findings(kind: str, meta: dict, ana: dict | None, preset: dict, settin
     # ---- format ---------------------------------------------------------
     if kind == "audio":
         b.add("format.container", "format", "info", "Container", measured=meta.get("container_long") or meta.get("container") or "?",
-              detail="Audio-only file: video container rules in the preset are not applied.")
+              detail="Audio-only file: video container rules in the spec are not applied.")
         pv = {}
     else:
         name = vocab.container_of(meta)
@@ -178,7 +178,7 @@ def media_findings(kind: str, meta: dict, ana: dict | None, preset: dict, settin
         if exp:
             ok = vocab.matches("containers", name, exp)
             b.add("format.container", "format", "pass" if ok else "fail", "Container", measured=label,
-                  expected=" or ".join(exp), detail="" if ok else "Does not match the delivery preset.")
+                  expected=" or ".join(exp), detail="" if ok else "Does not match the delivery spec.")
         else:
             b.add("format.container", "format", "info", "Container", measured=label)
     if vs:
@@ -392,7 +392,7 @@ def media_findings(kind: str, meta: dict, ana: dict | None, preset: dict, settin
                 b.items.extend(sub.items)
 
     if has_spec:
-        b.add("spec.preset", "spec", "info", "Compared against delivery preset", measured=preset.get("name"))
+        b.add("spec.preset", "spec", "info", "Compared against delivery spec", measured=preset.get("name"))
     return b.items
 
 
@@ -562,7 +562,7 @@ def sequence_findings(seq: dict, first_meta: dict | None, preset: dict, settings
                 detail.append(f"Prefix '{seq['prefix']}' does not match naming rule {ps['naming_regex']}")
         except _re.error as e:
             name_ok = False
-            detail.append(f"Naming rule {ps['naming_regex']!r} in the preset is not a valid regex ({e})")
+            detail.append(f"Naming rule {ps['naming_regex']!r} in the spec is not a valid regex ({e})")
     if ps.get("padding") and seq["padding"] != ps["padding"]:
         name_ok = False
         detail.append(f"Padding {seq['padding'] or 'none'} (expected {ps['padding']})")
@@ -667,7 +667,7 @@ def sequence_findings(seq: dict, first_meta: dict | None, preset: dict, settings
               measured=f"pix_fmt {v.get('pix_fmt')} · primaries {prim or '—'} · transfer {trc or '—'}",
               detail="Image sequences rarely carry reliable colour tags; confirm colour space with the vendor (e.g. ACEScg, Rec.709, sRGB).")
     if ps:
-        b.add("spec.preset", "spec", "info", "Compared against delivery preset", measured=preset.get("name"))
+        b.add("spec.preset", "spec", "info", "Compared against delivery spec", measured=preset.get("name"))
     return b.items
 
 
@@ -703,7 +703,7 @@ def still_findings(hdr: dict, meta: dict | None, preset: dict, settings: dict) -
         b.add("colour.tags", "colour", "info", "Colour metadata",
               measured=f"primaries {v.get('color_primaries') or '—'} · transfer {v.get('color_trc') or '—'}")
     if ps:
-        b.add("spec.preset", "spec", "info", "Compared against delivery preset", measured=preset.get("name"))
+        b.add("spec.preset", "spec", "info", "Compared against delivery spec", measured=preset.get("name"))
     return b.items
 
 

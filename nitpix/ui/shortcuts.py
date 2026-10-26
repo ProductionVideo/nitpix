@@ -43,7 +43,7 @@ SECTIONS = {
         ("Right-click", "Re-check, set review status, or remove the selection in one go"),
         ("Header", "Click a column header to sort; the Review screen's , and . follow that order"),
     ]),
-    "presets": ("Presets", "Describe what a delivery must be.", [
+    "presets": ("Specs", "Describe what a delivery must be.", [
         ("Chips", "Several selections mean “any of”; select nothing to skip the check"),
         ("+ other", "Type a value that isn't listed (“ProRes 422 HQ”, “Rec.709”, “48k”); it maps onto the vocabulary"),
         ("Hover", "Hover a chip to see the exact name ffprobe reports"),
@@ -59,7 +59,7 @@ SECTIONS = {
     "settings": ("Settings", "Project and app preferences.", []),
 }
 EVERYWHERE = ("Everywhere", "", [
-    ("1 – 6", "Dashboard, Media, Review, Presets, Reports, Settings (in Review too)"),
+    ("1 – 6", "Dashboard, Media, Review, Specs, Reports, Settings (in Review too)"),
     ("?", "This panel, opened on the screen you are on"),
     ("Drop", "Drop media on the window or the Dock icon; with no project open, one is made for it"),
 ])

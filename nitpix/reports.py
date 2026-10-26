@@ -221,9 +221,9 @@ def export_pdf(project, asset_ids=None) -> str:
     story = [Paragraph("QC report", st["h1"]), Spacer(1, 2),
              Paragraph(esc(S["project_name"]) + (f" · {esc(S['client'])}" if S.get("client") else ""), st["h2"]),
              Spacer(1, 6)]
-    info = [[P("Delivery preset", "head"), P(d["preset"].get("name")), P("Generated", "head"), P(gen)],
+    info = [[P("Delivery spec", "head"), P(d["preset"].get("name")), P("Generated", "head"), P(gen)],
             [P("Reviewer", "head"), P(S.get("reviewer") or "—"), P("Assets", "head"), P(len(assets))],
-            [P("Preset detail", "head"), P(d["preset"].get("description") or "—"), P("Tools", "head"),
+            [P("Spec detail", "head"), P(d["preset"].get("description") or "—"), P("Tools", "head"),
              P(" / ".join((v.get("version") or "missing").split(" Copyright")[0] for v in d["tools"].values()), "cellm")]]
     story.append(tbl(info, [32 * mm, W / 2 - 32 * mm, 26 * mm, W / 2 - 26 * mm], head=False))
     story.append(Spacer(1, 10))
