@@ -90,7 +90,10 @@ QLabel[banner="true"] {{ background: {T['warn_bg']}; color: {T['warn']}; padding
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ background: {T['panel']}; border: 1px solid {T['line2']}; border-radius: 6px; padding: 4px 8px; selection-background-color: {T['focus']}; }}
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{ border-color: {T['focus']}; }}
 QComboBox::drop-down {{ border: 0; width: 18px; }}
-QComboBox QAbstractItemView {{ background: {T['panel']}; border: 1px solid {T['line2']}; selection-background-color: {T['sel']}; }}
+QComboBox {{ padding-right: 22px; }}
+QComboBox QAbstractItemView {{ background: {T['panel']}; border: 1px solid {T['line2']}; selection-background-color: {T['sel']}; outline: 0; padding: 4px; }}
+QComboBox QAbstractItemView::item {{ padding: 5px 10px; min-height: 18px; }}
+QComboBox QAbstractItemView::item:selected {{ background: {T['sel']}; color: {T['ink']}; }}
 QTableView, QTreeView, QListView {{ background: {T['panel']}; alternate-background-color: {T['panel2']}; border: 1px solid {T['line']}; gridline-color: {T['line']}; selection-background-color: {T['sel']}; selection-color: {T['ink']}; }}
 QHeaderView::section {{ background: {T['panel2']}; color: {T['muted']}; border: 0; border-bottom: 1px solid {T['line']}; border-right: 1px solid {T['line']}; padding: 4px 8px; font-weight: 500; font-size: 11px; }}
 QTabBar::tab {{ background: transparent; color: {T['muted']}; padding: 8px 14px; border-bottom: 2px solid transparent; }}

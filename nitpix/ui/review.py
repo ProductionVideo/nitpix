@@ -84,6 +84,22 @@ def btn(text, tip="", slot=None, **props) -> QPushButton:
     return b
 
 
+# Physical number-row keys, so ⇧2 means "2" whatever the layout types for it (" on UK, @ on US).
+_MAC_DIGIT_KEYCODES = {29: 0, 18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9}  # kVK_ANSI_0..9
+_SHIFTED = {"!": 1, "@": 2, '"': 2, "#": 3, "£": 3, "$": 4, "§": 6, "^": 6, "&": 6, ")": 0, "=": 0}
+
+
+def shifted_digit(ev) -> int | None:
+    """The digit on the key pressed, for a Shift+number press, on any keyboard layout."""
+    if platform.system() == "Darwin":
+        d = _MAC_DIGIT_KEYCODES.get(ev.nativeVirtualKey())
+        if d is not None:
+            return d
+    if Qt.Key.Key_0 <= ev.key() <= Qt.Key.Key_9:
+        return ev.key() - Qt.Key.Key_0
+    return _SHIFTED.get(ev.text())
+
+
 def fmt_time(ts) -> str:
     return time.strftime("%d %b, %H:%M", time.localtime(ts)) if ts else ""
 
@@ -167,13 +183,13 @@ class FindingRow(QFrame):
         self.group = QButtonGroup(self)
         self.group.setExclusive(False)
         for key, label, k in (("pass", "Pass", "1"), ("issue", "Issue", "2"), ("warning", "Warning", "3"), ("na", "N/A", "4")):
-            b = btn(label, f"{label} ({k})", decide=key, seg=True)
+            b = btn(label, f"{label} (⇧{k})", decide=key, seg=True)
             b.setCheckable(True)
             b.setChecked(f.get("reviewer_status") == key)
             b.clicked.connect(lambda _, key=key: screen.decide(f["id"], None if f.get("reviewer_status") == key else key))
             act.addWidget(b)
         if f.get("reviewer_status"):
-            act.addWidget(btn("Clear", "Clear decision (0)", lambda: screen.decide(f["id"], None), ghost=True))
+            act.addWidget(btn("Clear", "Clear decision (⇧0)", lambda: screen.decide(f["id"], None), ghost=True))
             by = ElideLabel(f"{f.get('reviewed_by') or ''} {fmt_time(f.get('reviewed_at'))}")
             by.setProperty("faint", True)
             act.addWidget(by, 1)
@@ -967,11 +983,13 @@ class ReviewScreen(QWidget):
             self.tabs.setCurrentIndex(0)
             if f.get("frame_in") is not None and f["check_key"] != "seq.range":
                 self.seek(f["frame_in"])
-        elif txt in ("1", "2", "3", "4", "0"):
+        elif shift and shifted_digit(ev) in (1, 2, 3, 4, 0):
+            # ⇧1–⇧4 decide the focused finding; plain 1–6 stay free for switching screens
+            d = shifted_digit(ev)
             vis = [f for f in self.visible_findings() if f["auto_result"] not in ("pass", "info") or f.get("reviewer_status")]
             f = vis[self.focus_idx if self.focus_idx >= 0 else 0] if vis else None
             if f:
-                self.decide(f["id"], {"1": "pass", "2": "issue", "3": "warning", "4": "na", "0": None}[txt])
+                self.decide(f["id"], {1: "pass", 2: "issue", 3: "warning", 4: "na", 0: None}[d])
         elif txt == ",":
             self._nav(-1)
         elif txt == ".":

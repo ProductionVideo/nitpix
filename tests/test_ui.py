@@ -139,7 +139,7 @@ class Screens(unittest.TestCase):
         self.assertEqual([n["kind"] for n in rv.asset["notes"]], ["bookmark"])
         # decide the open detection with the keyboard, then approve
         self.key("j")
-        self.key("1")
+        self.key("!", Qt.Key.Key_Exclam, shift=True)          # ⇧1 decides; plain 1 is for screens
         f = [x for x in rv.asset["findings"] if x["check_key"] == "content.black"][0]
         self.assertEqual((f["reviewer_status"], rv.asset["qc_result"]), ("pass", "pass"))
         self.key("a")
@@ -337,6 +337,34 @@ class Screens(unittest.TestCase):
         self.assertIn("this screen", dlg.nav.item(0).text())
         self.assertIn("Space", dlg.body.text())
         dlg.deleteLater()
+
+    def test_number_keys_switch_screens_and_shift_numbers_decide(self):
+        self.win.show_asset(self.aid)
+        rv = self.win.review
+        rv.setFocus()
+        self.app.sendEvent(rv, QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_2, Qt.KeyboardModifier.NoModifier, "2"))
+        self.assertEqual(self.win.current_view, "media")           # plain 2 is Media, even from Review
+        self.assertIsNone(next(f for f in rv.asset["findings"] if f["check_key"] == "content.black").get("reviewer_status"))
+        self.win.show_asset(self.aid)
+        rv.setFocus()
+        # UK layout: ⇧2 types a double quote; the key is still "2", so it means Issue
+        self.app.sendEvent(rv, QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_QuoteDbl, Qt.KeyboardModifier.ShiftModifier, '"'))
+        self.assertEqual(self.win.current_view, "review")
+        f = next(f for f in rv.asset["findings"] if f["check_key"] == "content.black")
+        self.assertEqual(f["reviewer_status"], "issue")
+
+    def test_low_resolution_detection(self):
+        from nitpix.ui import display
+        retina = [(1512, 982, 3024, 1964)]
+        self.assertTrue(display.low_resolution((1512, 982), 1.0, retina))     # Retina drawn at 1×: blurry
+        self.assertFalse(display.low_resolution((1512, 982), 2.0, retina))
+        self.assertFalse(display.low_resolution((1920, 1080), 1.0, [(1920, 1080, 1920, 1080)]))  # a real 1× monitor
+
+    def test_dropdowns_fit_their_longest_entry(self):
+        self.win.show_view("media")
+        combo = self.win.media.f_review
+        widest = max(combo.fontMetrics().horizontalAdvance(combo.itemText(i)) for i in range(combo.count()))
+        self.assertGreaterEqual(combo.view().minimumWidth(), widest + 20)
 
     def test_other_screens_build(self):
         for v in ("dashboard", "presets", "reports", "settings"):

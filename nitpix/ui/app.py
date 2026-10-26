@@ -21,13 +21,13 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 from .. import __version__, demo, libmpv, reports, service, updates
 from ..probe import tool_versions
 from ..store import recent_projects
-from . import deps, theme
+from . import deps, display, theme
 from .media import AssetModel, MediaScreen, setup_columns
 from .mpvwidget import gl_format
 from .presets import PresetsScreen
 from .shortcuts import ShortcutsDialog
 from .review import ReviewScreen, btn, chip
-from .widgets import ElideLabel, nav_icon
+from .widgets import ElideLabel, nav_icon, tidy_combo
 
 VIEWS = ["dashboard", "media", "review", "presets", "reports", "settings"]
 VIEW_LABEL = {"dashboard": "Dashboard", "media": "Media", "review": "Review", "presets": "Presets", "reports": "Reports",
@@ -473,7 +473,10 @@ class SettingsScreen(QWidget):
         self.iina_sock.setText(ii.get("fixed_socket") or "")
         tv = tool_versions()
         mpv = f"libmpv {libmpv.version()} at {libmpv.LIBMPV}" if libmpv.available() else f"libmpv not found ({libmpv.MPV_ERROR}); the frame viewer is used instead"
-        self.tools.setText("\n".join([f"{k}: {v['version'] or 'not found'}" for k, v in tv.items()] + [mpv]))
+        scr = self.window().screen() if self.window() else None
+        disp = [f"Display {display.describe(scr)}" + ("  (Low Resolution mode: see Get Info)" if display.low_resolution(
+            (scr.geometry().width(), scr.geometry().height()), self.window().devicePixelRatioF()) else "")] if scr else []
+        self.tools.setText("\n".join([f"{k}: {v['version'] or 'not found'}" for k, v in tv.items()] + [mpv] + disp))
         self.fix_btn.setVisible(bool(deps.missing()))
         self.auto_updates.blockSignals(True)
         self.auto_updates.setChecked(QSettings("nitpix", "nitpix").value("updates/auto", True, type=bool))
@@ -620,6 +623,7 @@ class MainWindow(QMainWindow):
         self.refresh_rail()
         QApplication.instance().installEventFilter(self)
         self.setAcceptDrops(True)
+        self._lowres_warned = False
         self.pending_roots: list[str] = []   # dropped while a scan was running; scanned next
         self.drop_hint = QLabel("Drop to scan into this project", self)
         self.drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -630,6 +634,8 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, ev):
         """Transport keys reach the player from anywhere in the review screen: a button that was
         just clicked, the tabs, the metadata tree. Text fields and dialogs keep their keys."""
+        if ev.type() == QEvent.Type.Polish and isinstance(obj, QComboBox):  # every dropdown, wherever it is built
+            tidy_combo(obj)
         if ev.type() == QEvent.Type.FileOpen:  # a file or folder dropped on the Dock icon / opened with nitpix
             self.ingest([ev.file()])
             return True
@@ -643,7 +649,7 @@ class MainWindow(QMainWindow):
                 if t == "?":
                     self.show_help()
                     return True
-                if view != "review" and t.isdigit() and 1 <= int(t) <= len(VIEWS) and self.session.project \
+                if t.isdigit() and 1 <= int(t) <= len(VIEWS) and self.session.project \
                         and not ev.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
                     self.show_view(VIEWS[int(t) - 1])
                     return True
@@ -918,6 +924,27 @@ class MainWindow(QMainWindow):
         if t.isdigit() and 1 <= int(t) <= len(VIEWS) and self.session.project:
             return self.show_view(VIEWS[int(t) - 1])
         super().keyPressEvent(ev)
+
+    # ---- display -------------------------------------------------------------------------
+    def check_display(self):
+        scr = self.screen()
+        if not scr or self._lowres_warned:
+            return
+        g = scr.geometry()
+        if display.low_resolution((g.width(), g.height()), self.devicePixelRatioF()):
+            self._lowres_warned = True
+            QMessageBox.information(self, "nitpix is in Low Resolution mode",
+                                    "This display is Retina, but macOS is running nitpix at standard resolution, "
+                                    "so text and pictures look soft.<br><br>To fix it: quit nitpix, select it in "
+                                    "Applications, choose <b>File ▸ Get Info</b> and untick <b>Open in Low Resolution</b>, "
+                                    "then open nitpix again.")
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if not getattr(self, "_screen_hooked", False) and self.windowHandle():
+            self._screen_hooked = True
+            self.windowHandle().screenChanged.connect(lambda _: QTimer.singleShot(300, self.check_display))
+        QTimer.singleShot(800, self.check_display)
 
     # ---- drag and drop ---------------------------------------------------------------
     @staticmethod

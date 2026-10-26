@@ -21,8 +21,8 @@ SECTIONS = {
         ("g", "Go to a timecode or frame number (Esc or an arrow key returns to the player)"),
         ("[  ]", "Previous / next marker: findings and notes in timeline order"),
         ("j  k", "Focus next / previous finding, and jump to it"),
-        ("1 2 3 4", "Decide the focused finding: Pass / Issue / Warning / N/A"),
-        ("0", "Clear the decision"),
+        ("⇧1 ⇧2 ⇧3 ⇧4", "Decide the focused finding: Pass / Issue / Warning / N/A"),
+        ("⇧0", "Clear the decision"),
         ("i  o", "Set in / out. With both set, playback loops the range"),
         ("b", "Bookmark this frame"),
         ("n", "Note at this frame (tick “in/out range” to cover the loop)"),
@@ -59,7 +59,7 @@ SECTIONS = {
     "settings": ("Settings", "Project and app preferences.", []),
 }
 EVERYWHERE = ("Everywhere", "", [
-    ("1 – 6", "Dashboard, Media, Review, Presets, Reports, Settings"),
+    ("1 – 6", "Dashboard, Media, Review, Presets, Reports, Settings (in Review too)"),
     ("?", "This panel, opened on the screen you are on"),
     ("Drop", "Drop media on the window or the Dock icon; with no project open, one is made for it"),
 ])

@@ -210,3 +210,20 @@ def nav_icon(name: str, light: str, dark: str, size: int = 18):
             icon.addPixmap(pm, QIcon.Mode.Normal, state)
             icon.addPixmap(pm, QIcon.Mode.Active, state)
     return icon
+
+
+def tidy_combo(combo):
+    """Dropdowns sized to their longest entry, with an open list at least that wide, drawn by the
+    stylesheet (the native macOS list ignores it and clipped long entries like "Approved w/ notes")."""
+    from PySide6.QtWidgets import QComboBox, QStyledItemDelegate
+    if combo.property("_tidy"):
+        return
+    combo.setProperty("_tidy", True)
+    combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+    combo.setItemDelegate(QStyledItemDelegate(combo))
+    view = combo.view()
+    fm = QFontMetrics(view.font())
+    widest = max([fm.horizontalAdvance(combo.itemText(i)) for i in range(combo.count())] or [0])
+    view.setMinimumWidth(widest + 48)
+    combo.model().rowsInserted.connect(lambda *_: view.setMinimumWidth(
+        max(fm.horizontalAdvance(combo.itemText(i)) for i in range(combo.count())) + 48))
