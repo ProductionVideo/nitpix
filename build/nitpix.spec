@@ -3,7 +3,10 @@
 
 Bundles the Python app with PySide6, libmpv (and its codec libraries) and the ffmpeg and
 ffprobe binaries, so the .app needs nothing installed. Build with tools/build_mac.sh.
-Library sources can be overridden: NITPIX_LIBMPV, NITPIX_FFMPEG_BIN (a directory)."""
+Library sources can be overridden: NITPIX_LIBMPV, NITPIX_FFMPEG_BIN (a directory).
+NITPIX_VARIANT=exp builds nitpix-exp.app for trying a development branch beside the release: its
+own name and bundle identifier, and no document types, so it never becomes the app that opens
+projects or media."""
 import os
 import sys
 
@@ -15,6 +18,9 @@ LIBMPV = os.environ.get("NITPIX_LIBMPV") or next(p for p in ("/opt/homebrew/lib/
 FFBIN = os.environ.get("NITPIX_FFMPEG_BIN") or next(d for d in ("/opt/homebrew/opt/ffmpeg-full/bin", "/opt/homebrew/opt/ffmpeg/bin", "/usr/local/bin", "/usr/bin") if os.path.exists(os.path.join(d, "ffmpeg")))
 EXT = ".exe" if sys.platform == "win32" else ""
 from nitpix import __version__ as VERSION  # noqa: E402
+
+EXP = os.environ.get("NITPIX_VARIANT") == "exp"
+NAME = "nitpix-exp" if EXP else "nitpix"
 
 binaries = [(LIBMPV, "."), (os.path.join(FFBIN, "ffmpeg" + EXT), "."), (os.path.join(FFBIN, "ffprobe" + EXT), ".")]
 datas = [(os.path.join(ROOT, "nitpix", "web"), os.path.join("nitpix", "web"))]
@@ -34,15 +40,15 @@ a = Analysis(
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, exclude_binaries=True, name="nitpix", console=False, icon=os.path.join(SPECPATH, "nitpix.icns"),
           target_arch=None, codesign_identity=None, entitlements_file=None)
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="nitpix")
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name=NAME)
 app = BUNDLE(
     coll,
-    name="nitpix.app",
+    name=NAME + ".app",
     icon=os.path.join(SPECPATH, "nitpix.icns"),
-    bundle_identifier="com.jakestebbings.nitpix",
+    bundle_identifier="com.jakestebbings.nitpix" + (".exp" if EXP else ""),
     info_plist={
-        "CFBundleName": "nitpix",
-        "CFBundleDisplayName": "nitpix",
+        "CFBundleName": NAME,
+        "CFBundleDisplayName": "nitpix (experimental)" if EXP else "nitpix",
         "CFBundleShortVersionString": VERSION,
         "CFBundleVersion": VERSION,
         "LSMinimumSystemVersion": "12.0",
@@ -50,7 +56,7 @@ app = BUNDLE(
         "NSPrincipalClass": "NSApplication",
         "LSApplicationCategoryType": "public.app-category.video",
         "NSHumanReadableCopyright": "© Jake Stebbings",
-        "CFBundleDocumentTypes": [
+        "CFBundleDocumentTypes": [] if EXP else [
             {"CFBundleTypeName": "nitpix project", "CFBundleTypeRole": "Editor", "LSHandlerRank": "Owner",
              "LSItemContentTypes": ["com.jakestebbings.nitpix.project"]},
             # media and folders can be dropped on the Dock icon or opened with nitpix; "Alternate" never
