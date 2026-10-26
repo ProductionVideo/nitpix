@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QSurfaceFormat
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
@@ -18,13 +18,14 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
                                QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTableView, QTextEdit, QVBoxLayout,
                                QWidget, QAbstractItemView)
 
-from .. import __version__, demo, libmpv, reports, service, updates
+from .. import __version__, demo, libmpv, reports, service, updates, variant
 from ..probe import tool_versions
 from ..store import recent_projects
 from . import deps, display, theme
 from .media import AssetModel, MediaScreen, setup_columns
 from .mpvwidget import gl_format
 from .presets import PresetsScreen
+from .prefs import EXPERIMENTAL_UPDATES, prefs
 from .shortcuts import ShortcutsDialog
 from .review import ReviewScreen, btn, chip
 from .widgets import ElideLabel, nav_icon, tidy_combo
@@ -439,12 +440,21 @@ class SettingsScreen(QWidget):
         urow = QHBoxLayout()
         self.version_lab = QLabel(f"nitpix {__version__}")
         urow.addWidget(self.version_lab)
-        urow.addWidget(btn("Check for updates", "Asks GitHub for the latest release", lambda: self.win.check_updates(manual=True)))
+        self.update_btn = btn("Check for updates", "Asks GitHub for the latest release", lambda: self.win.check_updates(manual=True))
+        urow.addWidget(self.update_btn)
         urow.addStretch(1)
         form.addRow(urow)
         self.auto_updates = QCheckBox("Check for updates when nitpix starts (at most once a day)")
-        self.auto_updates.toggled.connect(lambda on: QSettings("nitpix", "nitpix").setValue("updates/auto", on))
+        self.auto_updates.toggled.connect(lambda on: prefs().setValue("updates/auto", on))
         form.addRow("", self.auto_updates)
+        if variant.IS_EXPERIMENTAL:  # updates are the release's business
+            self.version_lab.setText(f"nitpix {__version__} (experimental build)")
+            self.update_btn.setEnabled(False)
+            self.auto_updates.setEnabled(False)
+            note = QLabel(EXPERIMENTAL_UPDATES)
+            note.setWordWrap(True)
+            note.setProperty("muted", True)
+            form.addRow("", note)
         row = QHBoxLayout()
         row.addWidget(btn("Save settings", "", self.save, primary=True))
         row.addStretch(1)
@@ -479,7 +489,7 @@ class SettingsScreen(QWidget):
         self.tools.setText("\n".join([f"{k}: {v['version'] or 'not found'}" for k, v in tv.items()] + [mpv] + disp))
         self.fix_btn.setVisible(bool(deps.missing()))
         self.auto_updates.blockSignals(True)
-        self.auto_updates.setChecked(QSettings("nitpix", "nitpix").value("updates/auto", True, type=bool))
+        self.auto_updates.setChecked(not variant.IS_EXPERIMENTAL and prefs().value("updates/auto", True, type=bool))
         self.auto_updates.blockSignals(False)
 
     def save(self):
@@ -580,7 +590,7 @@ class MainWindow(QMainWindow):
         root.addWidget(rail)
         self.rail = rail
         self.rail_collapsed = False
-        self.set_rail_collapsed(QSettings("nitpix", "nitpix").value("rail/collapsed", False, type=bool))
+        self.set_rail_collapsed(prefs().value("rail/collapsed", False, type=bool))
         # centre
         centre = QVBoxLayout()
         centre.setContentsMargins(0, 0, 0, 0)
@@ -761,14 +771,15 @@ class MainWindow(QMainWindow):
 
     def _title(self, asset_name: str | None = None):
         p = self.session.project
-        bits = [b for b in (asset_name, p.settings.get("project_name") if p else None, "nitpix") if b]
+        bits = [b for b in (asset_name, p.settings.get("project_name") if p else None,
+                            "nitpix (experimental)" if variant.IS_EXPERIMENTAL else "nitpix") if b]
         self.setWindowTitle(" — ".join(bits))
 
     def _place_window(self):
         """Fit the window to this screen; restore the last size and position when it still fits."""
         screen = self.screen() or QApplication.primaryScreen()
         avail = screen.availableGeometry() if screen else None
-        st = QSettings("nitpix", "nitpix")
+        st = prefs()
         geo = st.value("window/geometry")
         if geo is not None and self.restoreGeometry(geo) and (avail is None or avail.contains(self.frameGeometry().center())):
             if avail is None or (self.width() <= avail.width() and self.height() <= avail.height()):
@@ -808,7 +819,7 @@ class MainWindow(QMainWindow):
         self.close_btn.setProperty("iconOnly", c)
         self.close_btn.style().unpolish(self.close_btn)
         self.close_btn.style().polish(self.close_btn)
-        QSettings("nitpix", "nitpix").setValue("rail/collapsed", c)
+        prefs().setValue("rail/collapsed", c)
         self.refresh_rail()
 
     def refresh_rail(self):
@@ -1011,8 +1022,13 @@ class MainWindow(QMainWindow):
 
     # ---- updates ---------------------------------------------------------------------
     def check_updates(self, manual: bool = False):
-        """Ask GitHub for the latest release in a thread; the answer comes back as update_result."""
-        st = QSettings("nitpix", "nitpix")
+        """Ask GitHub for the latest release in a thread; the answer comes back as update_result.
+        Experimental builds never check: the release is the one that updates."""
+        if variant.IS_EXPERIMENTAL:
+            if manual:
+                self.toast(EXPERIMENTAL_UPDATES)
+            return
+        st = prefs()
         if not manual:
             if not st.value("updates/auto", True, type=bool):
                 return
@@ -1027,7 +1043,9 @@ class MainWindow(QMainWindow):
 
     def _update_ready(self, r: dict, manual: bool):
         self._updating = False
-        st = QSettings("nitpix", "nitpix")
+        if variant.IS_EXPERIMENTAL:
+            return
+        st = prefs()
         if r.get("error"):
             if manual:
                 self.toast(r["error"], True)
@@ -1065,6 +1083,8 @@ class MainWindow(QMainWindow):
 
     def _install_update(self, r: dict):
         from PySide6.QtWidgets import QProgressDialog
+        if variant.IS_EXPERIMENTAL:
+            return self.toast(EXPERIMENTAL_UPDATES, True)
         jobs = self.session.jobs
         if jobs and jobs.active:
             return self.toast("Finish or cancel the running scan before updating.", True)
@@ -1118,7 +1138,7 @@ class MainWindow(QMainWindow):
             jobs.cancel()
             time.sleep(0.3)
         self.poll.stop()
-        QSettings("nitpix", "nitpix").setValue("window/geometry", self.saveGeometry())
+        prefs().setValue("window/geometry", self.saveGeometry())
         self.review.shutdown()
         try:
             self.session._close_locked()
@@ -1154,7 +1174,7 @@ def _stress(app, win, count: int):
 def run(project: str | None = None) -> int:
     QSurfaceFormat.setDefaultFormat(gl_format())
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("nitpix")
+    app.setApplicationName("nitpix-exp" if variant.IS_EXPERIMENTAL else "nitpix")
     app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "web" / "branding" / "app-icon.png")))
     theme.load_fonts()
     app.setStyleSheet(theme.STYLESHEET)

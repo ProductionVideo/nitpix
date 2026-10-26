@@ -17,6 +17,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import variant
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS roots (id INTEGER PRIMARY KEY, path TEXT UNIQUE, added REAL);
@@ -349,15 +351,17 @@ class Project:
             self.conn.close()
 
 
-# NITPIX_STATE_DIR moves the app's own state (the recent-projects list); the tests point it at a
+# The app's own state (the recent-projects list) lives in ~/.nitpix, or ~/.nitpix-exp for an
+# experimental build (nitpix/variant.py). NITPIX_STATE_DIR moves it; the tests point it at a
 # temporary folder so they never touch the user's list.
 def _recent_file() -> Path:  # looked up on each use, so the override works whenever it is set
-    return Path(os.environ.get("NITPIX_STATE_DIR") or Path.home() / ".nitpix") / "recent.json"
+    return variant.state_dir() / "recent.json"
 
 
 RECENT_FILE = _recent_file()
 _OLD_RECENT = Path.home() / ".lhs-qc-review" / "recent.json"  # before the rename to nitpix
-if not os.environ.get("NITPIX_STATE_DIR") and not RECENT_FILE.exists() and _OLD_RECENT.exists():
+# The release takes over the list from before the rename; an experimental build never reads it.
+if not variant.IS_EXPERIMENTAL and not os.environ.get("NITPIX_STATE_DIR") and not RECENT_FILE.exists() and _OLD_RECENT.exists():
     try:
         RECENT_FILE.parent.mkdir(parents=True, exist_ok=True)
         RECENT_FILE.write_text(_OLD_RECENT.read_text())

@@ -5,8 +5,9 @@ Bundles the Python app with PySide6, libmpv (and its codec libraries) and the ff
 ffprobe binaries, so the .app needs nothing installed. Build with tools/build_mac.sh.
 Library sources can be overridden: NITPIX_LIBMPV, NITPIX_FFMPEG_BIN (a directory).
 NITPIX_VARIANT=exp builds nitpix-exp.app for trying a development branch beside the release: its
-own name and bundle identifier, and no document types, so it never becomes the app that opens
-projects or media."""
+own name and bundle identifier, no document types (so it never becomes the app that opens
+projects or media), and a BUILD_VARIANT file that makes it keep its own preferences and recent
+list and leave updates alone however it is launched (nitpix/variant.py)."""
 import os
 import sys
 
@@ -19,11 +20,20 @@ FFBIN = os.environ.get("NITPIX_FFMPEG_BIN") or next(d for d in ("/opt/homebrew/o
 EXT = ".exe" if sys.platform == "win32" else ""
 from nitpix import __version__ as VERSION  # noqa: E402
 
-EXP = os.environ.get("NITPIX_VARIANT") == "exp"
+VARIANT = os.environ.get("NITPIX_VARIANT") or "release"
+if VARIANT not in ("release", "exp"):
+    raise SystemExit(f"NITPIX_VARIANT must be release or exp, not {VARIANT!r}")
+EXP = VARIANT == "exp"
 NAME = "nitpix-exp" if EXP else "nitpix"
 
 binaries = [(LIBMPV, "."), (os.path.join(FFBIN, "ffmpeg" + EXT), "."), (os.path.join(FFBIN, "ffprobe" + EXT), ".")]
 datas = [(os.path.join(ROOT, "nitpix", "web"), os.path.join("nitpix", "web"))]
+if EXP:  # read by nitpix/variant.py at start-up; never written into the source tree
+    import tempfile
+    marker = os.path.join(tempfile.mkdtemp(prefix="nitpix-variant-"), "BUILD_VARIANT")
+    with open(marker, "w") as fh:
+        fh.write("exp\n")
+    datas.append((marker, "nitpix"))
 
 a = Analysis(
     [os.path.join(ROOT, "nitpix", "__main__.py")],

@@ -7,12 +7,12 @@ import platform
 import sys
 import threading
 
-from . import libmpv
+from . import libmpv, variant
 from .probe import find_tool, tool_versions
 
 
 def run(media: str | None = None) -> dict:
-    out = {"nitpix": _version(), "python": sys.version.split()[0], "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
+    out = {"nitpix": _version(), "build": variant.describe(), "python": sys.version.split()[0], "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
            "frozen": bool(getattr(sys, "frozen", False)), "executable": sys.executable,
            "bundle_root": getattr(sys, "_MEIPASS", None), "tools": tool_versions(),
            "ffmpeg_path": find_tool("ffmpeg"), "ffprobe_path": find_tool("ffprobe"),

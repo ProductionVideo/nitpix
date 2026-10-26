@@ -11,7 +11,7 @@ import re
 import urllib.error
 import urllib.request
 
-from . import __version__
+from . import __version__, variant
 
 REPO = "ProductionVideo/nitpix"
 API = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -70,6 +70,8 @@ def bundle_path() -> str | None:
 
 def can_install() -> bool:
     import os
+    if variant.IS_EXPERIMENTAL:  # an experimental build must not replace itself with a release
+        return False
     b = bundle_path()
     return bool(b) and os.access(os.path.dirname(b), os.W_OK)
 
@@ -83,6 +85,8 @@ def install(dmg_url: str, app_path: str | None = None, progress=None, opener=url
     import shutil
     import subprocess
     import tempfile
+    if variant.IS_EXPERIMENTAL:
+        raise RuntimeError("Experimental builds do not install updates.")
     target = app_path or bundle_path()
     if not target:
         raise RuntimeError("In-app install works in the packaged macOS app only.")

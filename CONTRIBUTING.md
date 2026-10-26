@@ -9,7 +9,7 @@ are accepted under the MIT licence in `LICENSE`.
 Open an issue with:
 
 - what you expected and what happened,
-- the output of `nitpix --selfcheck` (or `dist/nitpix.app/Contents/MacOS/nitpix --selfcheck`),
+- the output of `nitpix --selfcheck` (or `dist/nitpix.app/Contents/MacOS/nitpix --selfcheck`; it says whether the app is a release or an experimental build),
 - for a media problem, `ffprobe -v error -show_streams -show_format <file>` and, if you can share
   it, a short clip that reproduces it. Codec and colour edge cases (NotchLC, HAP, EXR, drop-frame
   timecode) are exactly the reports we want.

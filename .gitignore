@@ -6,3 +6,5 @@ build/*.icns
 build/*.png
 dist/
 .DS_Store
+dist-exp/
+build/pyi-exp/

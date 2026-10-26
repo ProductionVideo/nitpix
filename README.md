@@ -52,6 +52,29 @@ The app carries PySide6, libmpv with its codecs, ffmpeg and ffprobe, so the inst
 
 The bundle needs nothing installed on the target Mac. It is ad-hoc signed, which is enough to run on the machine that built it; before handing it to other machines it needs a Developer ID signature and notarisation, or recipients must right-click ▸ Open once. `dist/nitpix.app/Contents/MacOS/nitpix --selfcheck` reports what the bundle contains. Library sources for the build can be overridden with `NITPIX_LIBMPV` and `NITPIX_FFMPEG_BIN`.
 
+### Experimental builds
+
+To try a development branch while still using the released app:
+
+```bash
+NITPIX_VARIANT=exp tools/build_mac.sh                 # -> dist-exp/nitpix-exp.app ("nitpix (experimental)")
+NITPIX_VARIANT=exp NITPIX_DMG=1 tools/build_mac.sh    # ...and dist-exp/nitpix-exp-<version>-<commit>.dmg
+NITPIX_VARIANT=exp NITPIX_DIST=~/nitpix-experimental/x tools/build_mac.sh   # somewhere else
+NITPIX_VARIANT=exp .venv/bin/nitpix                   # the same, run from source
+```
+
+What an experimental build keeps separate:
+
+- **Preferences:** window, rail and update choices.
+- **Recent projects:** kept in `~/.nitpix-exp` instead of `~/.nitpix`.
+- **Updates:** it never checks for or installs them; the release remains the one that updates.
+- **File associations:** it never becomes the app that opens projects or media.
+- **Build output:** it never writes to `dist/`.
+
+`--selfcheck` reports which build an app is (`"build"`).
+
+**It does not separate projects.** Opening a project in an experimental build edits that project's data (notes, review status, settings, scans), exactly as the release would. The same applies to the demo project in `~/nitpix Projects/demo`. Try experimental builds on a throwaway project, or a copy of one.
+
 ### Renamed from LHS-QC Review
 
 Projects are `.nitpix` folders now; older `.lhsqc` folders still open. The recent-projects list is carried over on first launch. Environment variables are `NITPIX_*` (were `LHSQC_*`). IINfo sidecars written by the old name are still recognised. The built-in spec ids (e.g. `lhs_hd_prores_25`) are unchanged so saved projects keep their spec. Delivery specs were called presets before 0.5.5; only the name changed.
