@@ -113,6 +113,7 @@ QLabel[mono="true"] {{ font-family: "IBM Plex Mono"; font-size: 12px; }}
 QLabel[h1="true"] {{ font-size: 18px; font-weight: 600; }}
 QLabel[h2="true"] {{ font-size: 15px; font-weight: 600; }}
 QLabel[tc="true"] {{ font-family: "IBM Plex Mono"; font-size: 22px; font-weight: 500; }}
+QLabel[tc="true"][pending="true"] {{ color: {T['muted']}; }}
 QMenu {{ background: {T['panel']}; border: 1px solid {T['line2']}; }} QMenu::item:selected {{ background: {T['sel']}; }}
 QCheckBox, QRadioButton {{ background: transparent; }}
 QCheckBox::indicator {{ width: 14px; height: 14px; }}

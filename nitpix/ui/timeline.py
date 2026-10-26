@@ -29,6 +29,7 @@ class Timeline(QWidget):
         self.audio = {}
         self.in_frame = self.out_frame = None
         self._hits = []  # (rect, kind, id, frame)
+        self._dragged = False  # the button went down here and the pointer has moved since
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -173,6 +174,7 @@ class Timeline(QWidget):
 
     # ---- mouse -----------------------------------------------------------------
     def mousePressEvent(self, e):
+        self._dragged = False
         pos = e.position()
         for r, kind, mid, f in self._hits:
             if r.contains(pos):
@@ -182,8 +184,17 @@ class Timeline(QWidget):
         if self._track().adjusted(0, -10, 0, 20).contains(pos):
             self.seek_requested.emit(self._frame_at(pos.x()))
 
+    def mouseReleaseEvent(self, e):
+        # After a drag, the release can land somewhere the last move did not report (moves are
+        # coalesced), even outside the widget; that is where the scrub ends. A click without a
+        # drag has already seeked, to the marker's own frame when it hit one.
+        if self._dragged and e.button() == Qt.MouseButton.LeftButton:
+            self._dragged = False
+            self.seek_requested.emit(self._frame_at(e.position().x()))
+
     def mouseMoveEvent(self, e):
         if e.buttons() & Qt.MouseButton.LeftButton:
+            self._dragged = True
             self.seek_requested.emit(self._frame_at(e.position().x()))
         else:
             for r, kind, mid, f in self._hits:
