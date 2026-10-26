@@ -2,14 +2,16 @@
 metadata on the right. Mirrors the web review view, with mpv playing the source."""
 from __future__ import annotations
 
+import math
 import os
 import platform
+import re
 import subprocess
 import time
 from fractions import Fraction
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtGui import QFontMetricsF, QPixmap
 from shiboken6 import isValid
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
                                QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter, QStackedLayout,
@@ -53,7 +55,14 @@ class PosCtx:
         return str(self.first + f) if self.seq else frames_to_tc(self.start + int(f), self.rate, self.drop)
 
     def sub(self, f) -> str:
-        return "" if f is None else (f"idx {f}" if self.seq else f"fr {f}")
+        return "" if f is None else (f"idx {f}" if self.seq else str(f))
+
+    def counter(self, f) -> str:
+        return f"{self.sub(f)} / {self.count} frames"
+
+    def counter_shape(self) -> tuple[str, int, str]:
+        """The counter line as (fixed prefix, digits that vary, fixed suffix), for sizing."""
+        return ("idx " if self.seq else ""), len(str(self.count - 1)), f" / {self.count} frames"
 
     def parse(self, s: str):
         s = s.strip()
@@ -309,7 +318,7 @@ class ReviewScreen(QWidget):
         # transport: clusters in a flow layout, so a narrow window wraps them onto a second
         # row instead of growing the window
         tr = FlowLayout(hspacing=10, vspacing=6)
-        tcbox = QWidget()
+        self.tcbox = tcbox = QWidget()
         tcl = QVBoxLayout(tcbox)
         tcl.setContentsMargins(0, 0, 0, 0)
         tcl.setSpacing(0)
@@ -321,6 +330,8 @@ class ReviewScreen(QWidget):
         self.tc_sub.setProperty("muted", True)
         tcl.addWidget(self.tc_lab)
         tcl.addWidget(self.tc_sub)
+        for lab in (self.tc_lab, self.tc_sub):
+            lab.installEventFilter(self)  # a font or style change re-sizes the block (_reserve_tc)
         tr.addWidget(tcbox)
         buttons = Cluster(spacing=2)
         for text, tip, slot in (("|◀", "Start (Home)", lambda: self.seek(0)), ("◀|", "Back one frame (←)", lambda: self.step(-1)),
@@ -407,6 +418,7 @@ class ReviewScreen(QWidget):
         self.timeline.set_asset(a, self.ctx)
         self.timeline.set_frame(self.frame)
         self._render_tabs()
+        self._reserve_tc()
         self._update_tc()
         self._nav_buttons()
         if not same:
@@ -504,7 +516,47 @@ class ReviewScreen(QWidget):
         if bool(self.tc_lab.property("pending")) != (self._settle is not None):
             self.tc_lab.setProperty("pending", self._settle is not None)  # dimmed until the picture is there
             repolish(self.tc_lab)
-        self.tc_sub.setText(f"{self.ctx.sub(self.frame)} / {self.ctx.count} frames")
+        self.tc_sub.setText(self.ctx.counter(self.frame))
+
+    def _reserve_tc(self):
+        """Give the timecode block one width that fits every position of this asset, so the
+        transport beside it stays put while the counter runs. Labels use proportional digits
+        and gain digits as frames go up, so each varying digit is counted as the font's widest
+        and the longest digit count is used; the start timecode, separators and frame total are
+        taken as they are. Sized per asset and on font or screen changes, never per frame."""
+        if not self.ctx:
+            return
+        c = self.ctx
+        last = c.count - 1
+        tc = [str(c.first), str(c.first + last)] if c.seq else [c.label(0), c.label(last)]
+        prefix, digits, suffix = c.counter_shape()
+        need = max(self._text_room(self.tc_lab, tc, every_digit=True),
+                   self._text_room(self.tc_sub, [prefix + "0" * digits + suffix], every_digit=False, span=(len(prefix), len(prefix) + digits)))
+        m = self.tcbox.layout().contentsMargins()
+        self.tcbox.setMinimumWidth(need + m.left() + m.right())
+
+    @staticmethod
+    def _text_room(lab: QLabel, samples, every_digit=True, span=None) -> int:
+        lab.ensurePolished()  # the stylesheet's font, not the one set in code
+        fm = QFontMetricsF(lab.font())
+        wide = max("0123456789", key=fm.horizontalAdvance)
+        w = 0.0
+        for s in samples:
+            if every_digit:
+                s = re.sub(r"\d", wide, s)
+            else:
+                a, b = span
+                s = s[:a] + wide * (b - a) + s[b:]
+            w = max(w, fm.horizontalAdvance(s))
+        m = lab.contentsMargins()
+        return math.ceil(w) + m.left() + m.right() + 2 * lab.margin() + 1
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        h = self.window().windowHandle()
+        if h is not None and not getattr(self, "_screen_hooked", False):
+            h.screenChanged.connect(lambda _s: self._reserve_tc())  # another display's scaling
+            self._screen_hooked = True
 
     def _persist_frame(self):
         if self.asset:
@@ -887,6 +939,9 @@ class ReviewScreen(QWidget):
             self.status.emit(str(e), True)
 
     def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange) and obj in (getattr(self, "tc_lab", None), getattr(self, "tc_sub", None)):
+            QTimer.singleShot(0, self._reserve_tc)
+            return False
         if ev.type() == ev.Type.MouseButtonPress and obj in (self.player, self.still, self.timeline, self.player.parentWidget()):
             self.setFocus()
             return False
