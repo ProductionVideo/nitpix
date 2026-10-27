@@ -17,6 +17,11 @@ generations, decoder safeguards, rational frame maths, shutdown) with only the d
   with no media, the surface is neutral grey with a simple headlight so the shape reads.
   Faces seen from behind are darker and never show media. Alpha is premultiplied and shown over
   the surface's grey. Mipmapped, anisotropic sampling for surfaces seen at an angle.
+- Two ways to show the media, never both at once: mode "surfaces" uses each assigned object's own
+  UVs (above); mode "projectors" ignores UVs and assignments and casts the picture from one
+  virtual projector (nitpix/projector.py) onto every surface, with occlusion
+  (nitpix/ui/projection.py). A surface is lit on its front side (by winding) only, when that side
+  faces the projector: single-sided, like the media in surfaces mode. Switching mode only repaints.
 
 GL objects are created and destroyed with this widget's context current, on the GUI thread;
 shutdown() releases them before the render context and the core.
@@ -34,6 +39,7 @@ from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLFramebufferObject, QOpenGLFr
 from ..scene import UV_EDGE
 from .mpvrender import FrameClock, IndexedDraw
 from .mpvwidget import MpvWidget
+from .projection import ProjectionPass, look_through, vec3
 
 MAX_TEXTURE = 3840
 
@@ -42,6 +48,7 @@ GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER, GL_LINEAR, GL_LINEAR_MIPMAP_LINEAR
 GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE, GL_TEXTURE_MAX_ANISOTROPY = 0x2802, 0x2803, 0x812F, 0x84FE
 GL_DEPTH_TEST, GL_BLEND, GL_CULL_FACE, GL_SCISSOR_TEST = 0x0B71, 0x0BE2, 0x0B44, 0x0C11
 GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_FRAMEBUFFER, GL_CW, GL_CCW = 0x4000, 0x0100, 0x8D40, 0x0900, 0x0901
+GL_TEXTURE1 = 0x84C1
 
 VERT = """#version 330 core
 layout(location = 0) in vec3 pos;
@@ -65,18 +72,43 @@ uniform int video;        // 1: a frame has been drawn into the texture
 uniform vec3 eye;
 uniform float selected;
 uniform float edge;       // UV_EDGE: export noise beyond 0-1 still samples the image's edge
+uniform int mode;         // 0: each object's UVs; 1: the projector
+uniform int lit;          // mode 1: the projector can project
+uniform mat4 pvp;         // world -> projector clip space
+uniform vec3 ppos;
+uniform sampler2D pdepth; // nearest surface per projector texel, as distance / pfar
+uniform float pnear;
+uniform float pfar;
+uniform float ptexel;     // one visibility texel's width per metre of distance
 out vec4 frag;
 void main() {
-    vec3 n = normalize(cross(dFdx(v_world), dFdy(v_world)));
+    vec3 n = normalize(cross(dFdx(v_world), dFdy(v_world)));   // the face's normal, towards the camera
     float light = 0.55 + 0.45 * abs(dot(n, normalize(eye - v_world)));
     vec3 grey = vec3(0.42) * light;
     vec3 c = grey;
     if (!gl_FrontFacing) {
         c = grey * 0.55;                                   // seen from behind: never media
-    } else if (media == 1 && video == 1
-               && all(greaterThanEqual(v_uv, vec2(-edge))) && all(lessThanEqual(v_uv, vec2(1.0 + edge)))) {
-        vec4 t = texture(tex, clamp(v_uv, 0.0, 1.0));     // premultiplied alpha
-        c = t.rgb + grey * (1.0 - t.a);
+    } else if (mode == 0) {
+        if (media == 1 && video == 1
+            && all(greaterThanEqual(v_uv, vec2(-edge))) && all(lessThanEqual(v_uv, vec2(1.0 + edge)))) {
+            vec4 t = texture(tex, clamp(v_uv, 0.0, 1.0));  // premultiplied alpha
+            c = t.rgb + grey * (1.0 - t.a);
+        }
+    } else if (lit == 1 && video == 1) {
+        vec4 pc = pvp * vec4(v_world, 1.0);                // pc.w: distance along the aim
+        float facing = dot(n, normalize(ppos - v_world));  // n is this front face's normal here
+        if (pc.w > pnear && pc.w <= pfar && facing > 0.0) {
+            vec2 ndc = pc.xy / pc.w;
+            if (all(lessThanEqual(abs(ndc), vec2(1.0)))) {
+                vec2 st = ndc * 0.5 + 0.5;                 // v = 1 is the top of the image, as in the texture
+                float slope = sqrt(max(1.0 - facing * facing, 0.0)) / max(facing, 0.05);
+                float bias = pc.w * ptexel * (1.5 + 2.0 * min(slope, 20.0)) + 1e-4 * pc.w;
+                if (pc.w <= texture(pdepth, st).r * pfar + bias) {
+                    vec4 t = texture(tex, st);
+                    c = t.rgb + grey * (1.0 - t.a);
+                }
+            }
+        }
     }
     c = mix(c, vec3(0.25, 0.55, 1.0), selected * 0.22);
     frag = vec4(c, 1.0);
@@ -129,6 +161,7 @@ class MappingView(MpvWidget):
     texture_changed = Signal(object)   # (texture w, h, source w, h), or None
     problem = Signal(str)              # rendering cannot work as intended (shown to the user)
     camera_input = Signal()            # the user dragged or scrolled in the view
+    look_changed = Signal(bool)        # looking through the projector, or back to the orbit camera
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -142,6 +175,13 @@ class MappingView(MpvWidget):
         self.selected = set()
         self._meshes = {}                # geometry id -> (Geometry, _Mesh)
         self._scene_dirty = False
+        self._geo_version = 0            # bumped whenever the geometry may have changed
+        # what is shown: "surfaces" (UV assignments) or "projectors" (the projector's picture)
+        self.mode = "surfaces"
+        self.projector = None            # nitpix.projector.Projector, or None
+        self.clip_aspect = None          # display width / height of the clip, for the projector
+        self.looking_through = False
+        self.projection = None           # ProjectionPass, made with the context
         self._world = {}                 # object key -> (QMatrix4x4, mirrored)
         # camera
         self.yaw, self.pitch, self.dist = 0.0, 12.0, 5.0
@@ -186,6 +226,7 @@ class MappingView(MpvWidget):
                     m = (q, q.determinant() < 0, o)
                 self._world[o.key] = m
         self._scene_dirty = True
+        self._geo_version += 1
         if frame:
             self.frame_all(reset=True)
         else:
@@ -196,9 +237,40 @@ class MappingView(MpvWidget):
         self.selected = set(selected)
         self.update()
 
+    # ---- projector -----------------------------------------------------------------------
+    def set_mode(self, mode):
+        """ "surfaces" or "projectors": which way the media is shown. Only repaints."""
+        self.mode = mode
+        if mode != "projectors":
+            self.look_through(False)
+        self.update()
+
+    def set_projector(self, projector, clip_aspect=None):
+        """The projector (or None) and the clip's aspect it follows. Only repaints; the visibility
+        texture is rebuilt at the next paint if its pose, field of view or aspect changed."""
+        self.projector = projector
+        self.clip_aspect = clip_aspect
+        if projector is None or projector.problem():
+            self.look_through(False)
+        self.update()
+
+    def projecting(self) -> bool:
+        p = self.projector
+        return self.mode == "projectors" and p is not None and p.enabled and p.problem() is None and self.scene is not None
+
+    def look_through(self, on: bool):
+        """See the stage from the projector (its pose and image); any orbit, pan, zoom or framing
+        returns to the orbit camera exactly as it was."""
+        on = bool(on) and self.projector is not None and self.projector.problem() is None
+        if on != self.looking_through:
+            self.looking_through = on
+            self.look_changed.emit(on)
+            self.update()
+
     # ---- camera --------------------------------------------------------------------------
     def frame_all(self, reset=False):
         """Fit the whole stage in view; `reset` also returns to the front view."""
+        self.look_through(False)
         if self.scene is not None:
             lo, hi = self.scene.bounds
             self.cam_target = QVector3D(*[(a + b) / 2 for a, b in zip(lo, hi)])
@@ -209,11 +281,13 @@ class MappingView(MpvWidget):
         self._camera_changed()
 
     def orbit(self, dx, dy):
+        self.look_through(False)
         self.yaw = (self.yaw - dx * 0.3) % 360
         self.pitch = max(-89.0, min(89.0, self.pitch + dy * 0.3))
         self._camera_changed()
 
     def pan(self, dx, dy):
+        self.look_through(False)
         s = self.dist * 0.0012
         y = math.radians(self.yaw)
         right = QVector3D(math.cos(y), 0, -math.sin(y))
@@ -221,6 +295,7 @@ class MappingView(MpvWidget):
         self._camera_changed()
 
     def zoom(self, steps):
+        self.look_through(False)
         self.dist = max(self.radius * 0.02, min(self.radius * 40, self.dist * (0.9 ** steps)))
         self._camera_changed()
 
@@ -229,10 +304,14 @@ class MappingView(MpvWidget):
         self.update()
 
     def _eye(self) -> QVector3D:
+        if self.looking_through:
+            return vec3(self.projector.position)
         p, y = math.radians(self.pitch), math.radians(self.yaw)
         return self.cam_target + QVector3D(math.cos(p) * math.sin(y), math.sin(p), math.cos(p) * math.cos(y)) * self.dist
 
     def view_projection(self, w, h) -> QMatrix4x4:
+        if self.looking_through and self.scene is not None:
+            return look_through(self.projector, self.projector.image_aspect(self.clip_aspect), w, h, self.scene.bounds)
         proj = QMatrix4x4()
         near = max(self.radius * 1e-3, self.dist - self.radius * 3, 1e-4)
         proj.perspective(40.0, w / max(1, h), near, self.dist + self.radius * 3)
@@ -333,6 +412,7 @@ class MappingView(MpvWidget):
             if not ok:
                 raise RuntimeError(self.prog.log() or "shader did not compile")
             self._draw = IndexedDraw(self.context())
+            self.projection = ProjectionPass(self)
             img = QImage(1, 1, QImage.Format.Format_RGBA8888)
             img.fill(QColor(0, 0, 0, 0))
             self._blank = QOpenGLTexture(img)
@@ -361,6 +441,12 @@ class MappingView(MpvWidget):
         f = self.context().extraFunctions()
         t0 = time.perf_counter() if self.stats is not None else None
         drew = self._update_video(f) if self.clock else False
+        self._sync_scene()                     # also releases the last meshes when the stage is emptied
+        projecting = self.projecting() and self.projection is not None
+        if projecting:
+            aspect = self.projector.image_aspect(self.clip_aspect)
+            if self.projection.prepare(f, self.projector, aspect, self.scene, self._geo_version, self._meshes, self._world, self._draw):
+                self.prog.bind()               # the visibility pass used its own program and target
         f.glBindFramebuffer(GL_FRAMEBUFFER, self.defaultFramebufferObject())
         dpr = self.devicePixelRatioF()
         W, H = int(self.width() * dpr), int(self.height() * dpr)
@@ -370,7 +456,6 @@ class MappingView(MpvWidget):
         f.glEnable(GL_DEPTH_TEST)
         f.glClearColor(0.07, 0.07, 0.075, 1.0)
         f.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        self._sync_scene()                     # also releases the last meshes when the stage is emptied
         if self.prog is not None and self.scene is not None:
             vp = self.view_projection(W, H)
             eye = self._eye()
@@ -379,15 +464,27 @@ class MappingView(MpvWidget):
             self.prog.setUniformValue("eye", eye)
             self.prog.setUniformValue1f("edge", UV_EDGE)
             self.prog.setUniformValue("video", 1 if (self.fbo is not None and self.has_frame and self.loaded) else 0)
+            self.prog.setUniformValue("mode", 1 if self.mode == "projectors" else 0)
+            self.prog.setUniformValue("lit", 1 if projecting else 0)
+            self.prog.setUniformValue("pdepth", 1)
+            if projecting:
+                pp = self.projection
+                self.prog.setUniformValue("pvp", pp.pvp)
+                self.prog.setUniformValue("ppos", vec3(self.projector.position))
+                for name, v in (("pnear", pp.near), ("pfar", pp.far), ("ptexel", pp.texel)):
+                    self.prog.setUniformValue1f(name, v)
+            f.glActiveTexture(GL_TEXTURE1)            # always something valid on the visibility sampler
+            f.glBindTexture(GL_TEXTURE_2D, self.projection.texture() if projecting else self._blank.textureId())
             f.glActiveTexture(GL_TEXTURE0)
             f.glBindTexture(GL_TEXTURE_2D, self.fbo.texture() if self.fbo is not None else self._blank.textureId())
+            tint = self.mode != "projectors"     # selection is a Surfaces thing
             for o in self.scene.objects:
                 model, mirrored, _o = self._world[o.key]
                 uv = self.assigned.get(o.key)
                 self.prog.setUniformValue("mvp", vp * model)
                 self.prog.setUniformValue("model", model)
                 self.prog.setUniformValue("media", 1 if uv is not None else 0)
-                self.prog.setUniformValue1f("selected", 1.0 if o.key in self.selected else 0.0)   # 1f: the Python-float overload sets it as an int (GL_INVALID_OPERATION)
+                self.prog.setUniformValue1f("selected", 1.0 if tint and o.key in self.selected else 0.0)   # 1f: the Python-float overload sets it as an int (GL_INVALID_OPERATION)
                 f.glFrontFace(GL_CW if mirrored else GL_CCW)      # negative scale turns winding round
                 for gid in o.geometries:
                     mesh = self._meshes.get(gid)
@@ -399,6 +496,10 @@ class MappingView(MpvWidget):
                     self._draw(GL_TRIANGLES, mesh.count)
                     mesh.vao.release()
             f.glFrontFace(GL_CCW)
+            p = self.projector
+            if (self.mode == "projectors" and p is not None and p.show_frustum and p.problem() is None
+                    and not self.looking_through and self.projection is not None):
+                self.projection.draw_frustum(f, vp, p, p.image_aspect(self.clip_aspect))
         if t0 is not None:
             self.stats.append((t0, time.perf_counter() - t0, drew, self.cam_version))
 
@@ -411,6 +512,9 @@ class MappingView(MpvWidget):
                 mesh.destroy()
             self._meshes = {}
             self.fbo = None
+            if self.projection is not None:
+                self.projection.destroy()
+                self.projection = None
             if self._blank is not None:
                 self._blank.destroy()
                 self._blank = None
