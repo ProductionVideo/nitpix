@@ -638,12 +638,17 @@ class MappingScreen(QWidget):
         self._push()
 
     # ---- keyboard ------------------------------------------------------------------------------
+    def closed_selector(self, w) -> bool:
+        """The clip or UV selector, closed and not editable: the workspace's keys still apply there."""
+        return w in (self.media_box, self.uv_box) and not w.isEditable() and not w.view().isVisible()
+
     def handle_key(self, ev) -> bool:
         k, txt = ev.key(), ev.text()
         shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         fps = max(1, round(float(self.ctx.rate))) if self.ctx else 25
         if k == Qt.Key.Key_Space:
-            self.toggle_play()
+            if not ev.isAutoRepeat():         # held down: one toggle, not play/pause flicker
+                self.toggle_play()
         elif k == Qt.Key.Key_Left:
             self.playhead.step(-fps if shift else -1)
         elif k == Qt.Key.Key_Right:

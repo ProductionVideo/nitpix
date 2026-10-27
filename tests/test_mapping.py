@@ -471,6 +471,79 @@ class OneSession(unittest.TestCase):
         QTest.keyClick(ms.tree, Qt.Key.Key_F)
         self.assertEqual(toggles, [1, "f"])
 
+    def test_space_on_the_closed_clip_or_uv_selector_plays(self):
+        """Through the window's key routing, focus left on a selector after choosing from it."""
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QDialog
+        w = self.window()
+        w.show()
+        w.show_asset(self.a)
+        w.show_view("mapping")
+        ms = w.mapping
+        ms._set_scene(load_scene(os.path.join(FIX, "stage.fbx")), "stage.fbx")
+        ms.select(["Stage/Screens/Centre"])                                  # two UV sets: the UV selector is live
+        toggles = []
+        ms.toggle_play = lambda: toggles.append(1)
+
+        def focus(widget):                                                   # offscreen, a closed popup can keep focus
+            w.activateWindow()
+            widget.setFocus()
+            pump(self.app, timeout=0.05)
+            self.assertIs(QApplication.focusWidget(), widget)
+
+        for box in (ms.media_box, ms.uv_box):
+            with self.subTest(box=box.toolTip()[:20]):
+                toggles.clear()
+                focus(box)
+                index = box.currentIndex()
+                QTest.keyClick(box, Qt.Key.Key_Space)
+                self.assertEqual(toggles, [1])                               # one press, one toggle
+                self.assertFalse(box.view().isVisible())                     # the list did not open
+                self.assertEqual(box.currentIndex(), index)
+                held = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier, " ", True)
+                QApplication.sendEvent(box, held)                            # auto-repeat while held: no flicker
+                self.assertEqual(toggles, [1])
+                QTest.keyClick(box, Qt.Key.Key_Space, Qt.KeyboardModifier.ShiftModifier)   # not plain Space: the selector's
+                self.assertEqual(toggles, [1])
+                box.hidePopup()
+                pump(self.app, timeout=0.05)
+        toggles.clear()
+        focus(ms.filter)
+        QTest.keyClicks(ms.filter, "a b")                                    # text fields keep Space
+        self.assertEqual((ms.filter.text(), toggles), ("a b", []))
+        ms.filter.clear()
+        dlg = QDialog(w)
+        dlg.setModal(True)
+        dlg.show()
+        pump(self.app, timeout=0.05)
+        QTest.keyClick(ms.media_box, Qt.Key.Key_Space)                       # a dialog on top keeps the keys
+        self.assertEqual(toggles, [])
+        dlg.close()
+        ms.media_box.hidePopup()                                             # (sent straight to it, it opened)
+        pump(self.app, timeout=0.05)
+        for target in (ms.tree, ms.play_btn):                                # as before: tree and buttons
+            focus(target)
+            QTest.keyClick(target, Qt.Key.Key_Space)
+        self.assertEqual(toggles, [1, 1])
+        w.show_view("review")                                                # QC keeps its own Space
+        rv_toggles = []
+        w.review.handle_key = lambda ev: (rv_toggles.append(ev.key()), True)[1]
+        focus(w.review)
+        QTest.keyClick(w.review, Qt.Key.Key_Space)
+        self.assertEqual((rv_toggles, toggles), ([Qt.Key.Key_Space], [1, 1]))
+        w.show_view("mapping")
+        toggles.clear()
+        focus(ms.media_box)
+        ms.media_box.showPopup()                                             # an open list keeps its keys (last:
+        pump(self.app, timeout=0.05)                                         # offscreen, focus stays in the popup)
+        QTest.keyClick(ms.media_box.view(), Qt.Key.Key_Space)
+        self.assertEqual(toggles, [])
+        ms.media_box.hidePopup()
+        pump(self.app, timeout=0.05)
+        focus(ms.tree)                                                       # leave focus usable for later tests
+
     def test_close_project_resets_mapping(self):
         w = self.window()
         w.ensure_mapping()

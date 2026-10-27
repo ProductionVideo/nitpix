@@ -654,8 +654,11 @@ class MainWindow(QMainWindow):
             return True
         if ev.type() == QEvent.Type.KeyPress and QApplication.activeModalWidget() is None:
             fw = QApplication.focusWidget() or (obj if isinstance(obj, QWidget) else None)
+            view = getattr(self, "current_view", None)
+            if view == "mapping" and self.mapping is not None and ev.key() == Qt.Key.Key_Space \
+                    and not ev.modifiers() and self.mapping.closed_selector(fw):
+                return self.mapping.handle_key(ev)          # Space plays/pauses rather than opening the clip / UV list
             if not text_focused(fw) and (fw is None or fw.window() is self):
-                view = getattr(self, "current_view", None)
                 if view == "review" and self.review.handle_key(ev):
                     return True
                 if view == "mapping" and self.mapping is not None and self.mapping.handle_key(ev):
@@ -1198,52 +1201,77 @@ class MainWindow(QMainWindow):
 
 
 def _mapping_check(app, win, stage: str, shot: str):
-    """Verification of packaged builds: open Mapping from the sidebar, import `stage`, show the
-    clip on every object with UVs, play, orbit, pause and step, then go back to QC. Grabs the
-    window at each point (shot-1-mapping.png ... next to `shot`) and prints what happened."""
+    """Verification of packaged builds: open Mapping from the sidebar; Space (a real key event
+    through the window's routing) with focus on the closed clip selector; import `stage` and
+    show the clip on every object with UVs; select and deselect while playing and orbiting;
+    scrub and step; QC -> Mapping -> QC. Counts every player error (GL errors surface there).
+    Grabs the window at each point (shot-1-mapping.png ... next to `shot`) and prints a log."""
+    from PySide6.QtGui import QKeyEvent
     base = os.path.splitext(shot)[0]
-    log = []
+    log, errors = [], []
+    win.review.player.error.connect(errors.append)
 
     def grab(name):
         win.grab().save(f"{base}-{name}.png")
+
+    def space(widget):
+        for t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            QApplication.sendEvent(widget, QKeyEvent(t, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier, " "))
 
     def step(i=0):
         ms = win.mapping
         if i == 0:
             win.nav["mapping"].click()
-            log.append(f"sidebar: {[k for k in NAV]} -> {win.current_view}")
+            win.mapping.view.error.connect(errors.append)
+            log.append(f"sidebar -> {win.current_view}")
             QTimer.singleShot(1500, lambda: step(1))
         elif i == 1:
             grab("1-mapping")
-            ms.import_scene(stage)
-            QTimer.singleShot(300, lambda: step(2))
+            ms.media_box.setFocus()
+            space(ms.media_box)
+            QTimer.singleShot(800, lambda: step(2))
         elif i == 2:
+            playing = not ms.view.paused
+            space(ms.media_box)
+            QTimer.singleShot(400, lambda: (log.append(f"Space on the clip selector: play {playing}, then paused "
+                                                       f"{ms.view.paused}, list open {ms.media_box.view().isVisible()}"), step(3)))
+        elif i == 3:
+            ms.import_scene(stage)
+            QTimer.singleShot(300, lambda: step(4))
+        elif i == 4:
             if ms.importer.busy:
-                return QTimer.singleShot(200, lambda: step(2))
+                return QTimer.singleShot(200, lambda: step(4))
             if not ms.scene:
                 log.append("import failed")
-                return step(9)
+                return step(99)
             ms.apply_all()
             log.append(f"stage: {len(ms.scene.objects)} objects, {len(ms.assign.uv)} show {ms.asset['name'] if ms.asset else None}")
             ms.toggle_play()
-            QTimer.singleShot(2000, lambda: step(3))
-        elif i == 3:
-            for _ in range(40):
-                ms.view.orbit(4, 1)
-            f = ms.view.frame
-            log.append(f"playing: {not ms.view.paused}, frame {f}")
+            keys = [o.key for o in ms.scene.objects]
+            for n in range(40):
+                QTimer.singleShot(50 * n, lambda n=n: (ms.view.orbit(4, 1), ms.select(keys[: n % 3 * 2])))
+            QTimer.singleShot(2200, lambda: step(5))
+        elif i == 5:
+            log.append(f"playing while selecting: {not ms.view.paused}, frame {ms.view.frame}")
             ms.toggle_play()
-            QTimer.singleShot(500, lambda: step(4))
-        elif i == 4:
+            ms.playhead.scrub(100)
+            QTimer.singleShot(800, lambda: step(6))
+        elif i == 6:
             f = ms.playhead.frame
             ms.playhead.step(1)
-            QTimer.singleShot(600, lambda: (log.append(f"step: {f} -> {ms.playhead.frame}"), grab("2-mapped"), step(5)))
-        elif i == 5:
+            QTimer.singleShot(600, lambda: (log.append(f"scrub 100, step: {f} -> {ms.playhead.frame}"), grab("2-mapped"), step(7)))
+        elif i == 7:
             f = ms.playhead.frame
             win.show_view("review")
-            QTimer.singleShot(1500, lambda: (log.append(f"QC: {win.current_view}, frame {win.review.frame} (Mapping was at {f})"), step(9)))
+            QTimer.singleShot(1500, lambda: (log.append(f"QC frame {win.review.frame} (Mapping {f})"), win.show_view("mapping"),
+                                             QTimer.singleShot(1500, lambda: step(8))))
+        elif i == 8:
+            f = ms.playhead.frame
+            win.show_view("review")
+            QTimer.singleShot(1500, lambda: (log.append(f"Mapping again at {f}, QC again at {win.review.frame}"), step(99)))
         else:
             grab("3-review")
+            log.append(f"player errors: {len(errors)}{' ' + repr(errors[:2]) if errors else ''}")
             print("mapping check: " + " | ".join(log), flush=True)
             app.quit()
 

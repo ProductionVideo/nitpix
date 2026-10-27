@@ -374,7 +374,7 @@ class MappingView(MpvWidget):
                 self.prog.setUniformValue("mvp", vp * model)
                 self.prog.setUniformValue("model", model)
                 self.prog.setUniformValue("media", 1 if uv is not None else 0)
-                self.prog.setUniformValue("selected", 1.0 if o.key in self.selected else 0.0)
+                self.prog.setUniformValue1f("selected", 1.0 if o.key in self.selected else 0.0)   # 1f: the Python-float overload sets it as an int (GL_INVALID_OPERATION)
                 f.glFrontFace(GL_CW if mirrored else GL_CCW)      # negative scale turns winding round
                 for gid in o.geometries:
                     mesh = self._meshes.get(gid)

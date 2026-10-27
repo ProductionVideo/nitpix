@@ -211,6 +211,52 @@ class Drawn(unittest.TestCase):
         c = close("Beyond", 2.5e-4, 0.9)                                       # ...and just inside the image
         self.assertTrue(like(c, RED), c)
 
+    def test_no_gl_or_player_errors_while_selecting_playing_and_switching_clips(self):
+        """GL errors persist until read, so one from the mesh draw surfaced later as libmpv's
+        "after creating texture: OpenGL error INVALID_OPERATION" (0.5.8: the selection uniform).
+        Pass 1 reads glGetError after every paint; pass 2 leaves the flag for libmpv to report,
+        across a clip of another size (new textures). Also: the selection tint shows."""
+        sc = load_scene(os.path.join(FIX, "stage.fbx"))
+        keys = [o.key for o in sc.objects]
+        media = {k: 0 for k in keys if sc.object(k).uv_sets}
+        for probe in (True, False):
+            with self.subTest(probe=probe):
+                v = self.make()
+                errors, gl = [], []
+                v.error.connect(errors.append)
+                if probe:
+                    paint = v.paintGL
+                    v.paintGL = lambda: (paint(), gl.append(v.context().functions().glGetError()))
+                v.set_scene(sc)
+                v.set_assignments({}, [])
+                self.load(v, self.corners, 0)
+                floor = centroid(sc, "Stage/Floor")
+                plain = self.pixel(v, v.grabFramebuffer(), floor)
+                v.set_assignments({}, keys)                                  # all selected (whatever is in front there): tinted
+                pump(0.1)
+                tinted = self.pixel(v, v.grabFramebuffer(), floor)
+                self.assertGreater(tinted[2] - tinted[0], plain[2] - plain[0] + 15, (plain, tinted))
+                v.set_pause(False)
+                for i in range(120):
+                    v.orbit(3, 0.5)
+                    if i % 8 == 0:
+                        sel = keys[: (i // 8) % 3 * 4]
+                        uv = {**media, "Stage/Screens/Centre": (i // 8) % 2}
+                        v.set_assignments(uv, sel)
+                    pump(0.01)
+                path, _rate = self.barclips["2997"]                          # 640x360 after 1280x512: new textures
+                self.load(v, path, 5)
+                v.set_pause(False)
+                for i in range(60):
+                    v.orbit(2, 1)
+                    v.set_assignments(media, keys[: i % 2 * len(keys)])
+                    pump(0.01)
+                self.assertGreater(v.frame, 5)
+                self.assertEqual(errors, [])
+                if probe:
+                    self.assertGreater(len(gl), 100)
+                    self.assertEqual(sorted(set(gl)), [0])
+
     def test_exact_frames_in_the_texture_while_navigating_and_scrubbing(self):
         sc = load_scene(os.path.join(FIX, "stage.fbx"))
         for name, (path, rate) in self.barclips.items():
