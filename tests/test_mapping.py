@@ -494,7 +494,7 @@ class Composition(_Screen):
         self.assertEqual(self.said[-1][0], "Replace cancelled: the stage is unchanged.")
         self.import_(part("right.fbx"), part("venue.obj"), replace=True)
         self.assertEqual([s.name for s in ms.stage.sources], ["right.fbx", "venue.obj"])
-        self.assertEqual(self.said[-1][0], "Stage replaced. venue.obj: 1 object without UVs (shown neutral).")
+        self.assertEqual(self.said[-1][0], "Stage replaced. venue.obj: 1 object without UVs (neutral in Surfaces; a projector still lights them).")
 
     def test_a_project_change_mid_batch_drops_the_rest(self):
         ms = self.ms
@@ -642,6 +642,89 @@ class Composition(_Screen):
         self.assertEqual(len(ms.selected_keys()), 30)                        # ten in each of the three left
         self.assertEqual(ms.tree.topLevelItem(0).text(0), "a/rig.obj")
         self.assertLess(took, 20)
+
+
+@unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
+class ProjectorsTab(_Screen):
+    """The Projectors tab: its states, the projector it edits, and what it leaves alone."""
+    def test_empty_states_then_a_projector_from_the_view(self):
+        ms = self.ms
+        ms.tabs.setCurrentIndex(1)
+        self.assertEqual((ms.view.mode, ms.mode_lab.text()), ("projectors", "Projector preview"))
+        self.assertEqual(ms.proj_panel.pages.currentIndex(), 0)              # no stage: add models first
+        self.import_(os.path.join(FIX, "projector", "projection.obj"))
+        self.assertEqual(ms.proj_panel.pages.currentIndex(), 1)              # a stage, no projector
+        self.assertIsNone(ms.view.projector)
+        ms.view.cam_target.setX(0.5)
+        ms.add_projector()
+        p = ms.projector
+        self.assertEqual(ms.proj_panel.pages.currentIndex(), 2)
+        self.assertIs(ms.view.projector, p)
+        eye = ms.view._eye()
+        self.assertEqual(p.position, (eye.x(), eye.y(), eye.z()))           # where the camera is...
+        self.assertEqual(p.target[0], 0.5)                                   # ...aimed where it looks
+        self.assertIsNone(p.aspect)                                          # following the clip
+        self.assertIn("Visibility 2048×1152", ms.proj_panel.info.text())     # 16:9 without a clip
+
+    def test_numbers_edit_the_projector_and_problems_are_said(self):
+        ms = self.ms
+        self.import_(os.path.join(FIX, "projector", "projection.obj"))
+        ms.tabs.setCurrentIndex(1)
+        ms.add_projector()
+        panel = ms.proj_panel
+        for spin, v in zip(panel.pos, (0, 2, 10)):
+            spin.setValue(v)
+        for spin, v in zip(panel.tgt, (0, 2, 0)):
+            spin.setValue(v)
+        panel.fov.setValue(30)
+        self.assertEqual((ms.projector.position, ms.projector.target, ms.projector.h_fov), ((0, 2, 10), (0, 2, 0), 30))
+        self.assertIn("Throw ratio 1.87:1 · 10.00 m to the target", panel.info.text())
+        panel.from_clip.setChecked(False)
+        panel.aspect.setValue(2.0)
+        self.assertEqual(ms.projector.aspect, 2.0)
+        self.assertIn("Visibility 2048×1024", panel.info.text())
+        panel.from_clip.setChecked(True)
+        self.assertIsNone(ms.projector.aspect)
+        panel.tgt[2].setValue(10)                                            # target on the projector
+        self.assertFalse(panel.problem.isHidden())
+        self.assertIn("at the projector's position", panel.problem.text())
+        self.assertFalse(panel.look_btn.isEnabled())
+        self.assertFalse(ms.view.projecting())
+        panel.enabled.setChecked(False)
+        self.assertFalse(ms.projector.enabled)
+
+    def test_tabs_and_the_projector_leave_the_stage_clip_and_assignments_alone(self):
+        ms = self.ms
+        clip = os.path.join(self.tmp, "wide.mov")
+        open(clip, "wb").close()
+        aid = self.session.project.upsert_asset(clip, kind="video", name="wide.mov", fps="25/1", frames=200, duration=8.0,
+                                                width=1280, height=512, scan_state="done")
+        ms.refresh_media()
+        ms._choose_media(aid)
+        self.import_(part("centre.obj"), os.path.join(FIX, "projector", "projection.obj"))
+        ms.select([ms.stage.sources[0].objects[0].key])
+        ms.apply_selected()
+        uv, cam = dict(ms.assign.uv), (ms.view.yaw, ms.view.dist)
+        loads = []
+        ms.view.load = lambda *a, **k: loads.append(a)
+        ms.tabs.setCurrentIndex(1)
+        ms.add_projector()
+        self.assertAlmostEqual(ms.projector.image_aspect(ms.clip_aspect), 2.5)   # from the clip
+        self.assertIn("aspect 2.500 (clip)", ms.proj_panel.info.text())
+        ms.tabs.setCurrentIndex(0)
+        self.assertEqual(ms.view.mode, "surfaces")
+        self.assertEqual((ms.assign.uv, ms.view.assigned, (ms.view.yaw, ms.view.dist)), (uv, uv, cam))
+        self.assertEqual((ms.asset["id"], loads), (aid, []))
+        ms.tabs.setCurrentIndex(1)
+        ms.remove_projector()
+        self.assertIsNone(ms.view.projector)
+        self.assertEqual((ms.assign.uv, len(ms.stage.sources)), (uv, 2))
+        ms.add_projector()
+        ms.remove_source(ms.stage.sources[1].id)                             # the stage changes under it: kept
+        self.assertIsNotNone(ms.view.projector)
+        ms.reset_project()                                                   # another project: it goes
+        self.assertIsNone(ms.projector)
+        self.assertEqual(ms.proj_panel.pages.currentIndex(), 0)
 
 
 @unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
@@ -807,6 +890,36 @@ class OneSession(unittest.TestCase):
         QTest.keyClick(ms.tree, Qt.Key.Key_Space)                            # elsewhere the keys still work
         QTest.keyClick(ms.tree, Qt.Key.Key_F)
         self.assertEqual(toggles, [1, "f"])
+
+    def test_projector_numbers_keep_their_keys_and_space_plays_after(self):
+        """Typing in a number never reaches the transport or the screen keys; Enter commits it and
+        hands the keys back, so Space plays."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        w = self.window()
+        w.show()
+        w.show_asset(self.a)
+        w.show_view("mapping")
+        ms = w.mapping
+        ms._replace_with([load_scene(os.path.join(FIX, "projector", "projection.obj"))])
+        ms.tabs.setCurrentIndex(1)
+        ms.add_projector()
+        toggles = []
+        ms.toggle_play = lambda: toggles.append(1)
+        spin = ms.proj_panel.pos[0]
+        w.activateWindow()
+        spin.setFocus()
+        pump(self.app, timeout=0.05)
+        spin.selectAll()
+        QTest.keyClicks(spin, "3")
+        QTest.keyClick(spin, Qt.Key.Key_Space)
+        self.assertEqual((toggles, w.current_view), ([], "mapping"))         # no play, no screen change for "3"
+        QTest.keyClick(spin, Qt.Key.Key_Return)
+        pump(self.app, timeout=0.05)
+        self.assertEqual(ms.projector.position[0], 3.0)
+        self.assertIsNot(QApplication.focusWidget(), spin)
+        QTest.keyClick(QApplication.focusWidget() or w, Qt.Key.Key_Space)
+        self.assertEqual(toggles, [1])
 
     def test_space_on_the_closed_clip_or_uv_selector_plays(self):
         """Through the window's key routing, focus left on a selector after choosing from it."""

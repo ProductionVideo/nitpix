@@ -101,9 +101,28 @@ Rules and current limits:
 - **Preview resolution:** media over 3840 px on the long side is downscaled for this spatial preview; QC still plays it at full size.
 - **Colours are display-referred:** the same picture as the QC player, but unlit and shown as an 8-bit preview. This is not an LED processor simulation.
 - **One playback session at a time:** moving between QC and Mapping hands over the position, and only one of them plays.
-- **Session only:** the stage (all its model files), assignments and camera last until you close the project or quit. Nothing is saved with the project yet.
+- **Session only:** the stage (all its model files), assignments, projector and camera last until you close the project or quit. Nothing is saved with the project yet.
 - **Scenes containing lines or points** (splines, guides) are refused with an explanation. Export surfaces only.
-- **Out of scope:** UV offset/scale, separate media per object, animation, lighting/PBR, projection or calibration, and output.
+- **Out of scope:** UV offset/scale, separate media per object, animation, lighting/PBR, calibration, and output.
+
+#### Projectors
+
+The **Projectors** tab, beside **Surfaces**, previews one virtual projector. It casts the current clip onto every surface of the stage, whether or not it has UVs, and nearer surfaces block it. The tab you are on decides what the view shows: **Surfaces** shows the UV assignments, **Projectors** shows the projector's picture (never both; the label under the view says which). Switching tabs keeps the clip, frame, playback, camera, stage and UV assignments.
+
+1. With a stage loaded, **Add projector** places it where the view's camera is, aimed where it looks. **Create from current view** does the same for an existing projector. Its image is the largest one of the image's aspect that fits the view: tan(FOV/2) = tan(20°) × the smaller of the window's and the image's aspect (the view's vertical field of view is 40°). Looking through it then shows the same framing.
+2. Set **Position** and **Target** in the stage's metres (Y up; the audience is usually +Z), and **Field of view**: the image's full horizontal angle. The throw ratio, the distance to the target and the image's size there are shown, not edited, so they can never disagree. Numbers apply on Enter, on leaving the field or on an arrow step. Enter or Escape hands the keys back to the view, so Space plays again; while you type in a number, Space and number keys stay in the field.
+3. **Aspect** follows the chosen clip (its display width ÷ height) and changes when you choose another clip. Untick **From clip** to set it yourself.
+4. **Look through projector** shows the stage from the projector. Dragging, scrolling, **F** or **Back to orbit view** return to the orbit camera exactly as it was. **Show frustum** draws its lines, image outline and a tick on the image's top edge. These are an overlay: they light nothing and block nothing.
+5. **Show projection** off keeps the projector but shows the stage neutral. **Remove projector** deletes it; the stage's files and the UV assignments are untouched.
+
+How the preview works and its limits:
+
+- **Geometry only.** A pinhole projector: no lens shift, keystone, brightness, colour, blending or calibration. The picture is the same display-referred preview as Surfaces, laid over the surface's grey by its alpha.
+- **Roll is fixed:** the image's top stays towards +Y. Aimed within 0.5° of straight down, the top points to −Z (upstage), so a floor projection reads correctly from the audience; straight up, it points to +Z. A target at the projector's position is refused with an explanation.
+- **Single-sided:** a surface is lit only on its front (by its winding) when that side faces the projector, like the media in Surfaces. Every surface blocks light from either side. Surfaces behind the projector, outside its image, or nearer than 1/10,000 of its farthest reach are not lit.
+- **Occlusion** comes from a 2048-pixel-wide visibility map of the nearest surface along each projector ray. The UI shows its size. It is rebuilt only when the stage, the pose, the field of view or the aspect change; moving the camera and playing reuse it. Shadow edges are one map pixel wide: about 2.6 mm at 10 m with a 30° field of view, and proportionally more at longer throws or wider angles. To avoid surfaces shadowing themselves, a surface counts as lit up to about 1.5 map pixels behind the nearest one (more at grazing angles). So an occluder closer to a surface than that, for example 1 cm in front of a wall 40 m away, may not shadow it.
+- **One projector, one clip,** for now. No catalogue of real projectors, lumens or pixel density: the 3840-pixel preview limit is the preview's, not a projector's.
+- Large stages draw as slowly in this tab as in Surfaces.
 
 What works and what does not, as tested (generated fixtures, plus a survey of 372 show-file OBJ/FBX models on one Mac in October 2026):
 
@@ -114,9 +133,9 @@ What works and what does not, as tested (generated fixtures, plus a survey of 37
 | **Imports, but shows little or no media** | Objects without UVs (about one model in six in the survey); UVs made for a repeating material or world-scaled rather than laid out for the media (about one in eight was mostly outside the image). The model needs a UV set for the media |
 | **Refused, with a reason** | FBX containing lines or points; files of lines or points only; damaged or empty files; FBX the importer cannot read (it names the FBX version) |
 | **Slow** | Stages of tens of thousands of objects: each object is drawn separately, so 20,000 objects run at about 8 frames/s and a 135,000-object venue model at about 1 frame/s (it also needed 14 GB). Export the screens you need, or join meshes that share a surface |
-| **Not supported** | Moving, rotating or scaling a model file in nitpix (export it where it belongs); adding one file twice; assigning per material slot; UV offset, scale, repeat or fitting; saving the stage and assignments with the project; other formats (glTF, USD, 3DS, Alembic) |
+| **Not supported** | Moving, rotating or scaling a model file in nitpix (export it where it belongs); adding one file twice; assigning per material slot; UV offset, scale, repeat or fitting; saving the stage, assignments and projector with the project; more than one projector, lens shift or projector data; other formats (glTF, USD, 3DS, Alembic) |
 
-`tests/fixtures/scenes/` has small generated stages to try it with (`stage.fbx`, `stage_cm_zup.fbx`, `stage.obj`). They include three screens, a floor, a truss without UVs, instances, duplicate names, a mirrored panel and UVs that run past 0–1. `uvedge.fbx` has UVs at and past the image's edge, tiled UVs and an object with two different UV sets. `parts/` is one stage exported as separate files: a centre screen (OBJ), side screens placed by their FBX node transforms (one authored in centimetres, Z up), a venue, and two `screen.obj` files in different folders. Add them together to try a composed stage.
+`tests/fixtures/scenes/` has small generated stages to try it with (`stage.fbx`, `stage_cm_zup.fbx`, `stage.obj`). They include three screens, a floor, a truss without UVs, instances, duplicate names, a mirrored panel and UVs that run past 0–1. `uvedge.fbx` has UVs at and past the image's edge, tiled UVs and an object with two different UV sets. `parts/` is one stage exported as separate files: a centre screen (OBJ), side screens placed by their FBX node transforms (one authored in centimetres, Z up), a venue, and two `screen.obj` files in different folders. Add them together to try a composed stage. `projector/` (from `tools/scenes/make_projector_fixtures.py`) has stages without any UVs for the projector: a wall with a nearer occluder, a square facing away, a plaque 5 cm proud of the wall, a surface behind the projector, and a curved surface.
 
 ### Renamed from LHS-QC Review
 
@@ -297,8 +316,8 @@ Before a release, on the Mac that builds it. None of this touches your installed
    NITPIX_SCREENSHOT_PARTS=tests/fixtures/scenes/parts \
    /tmp/rc/nitpix.app/Contents/MacOS/nitpix /tmp/rc/check.nitpix
    ```
-   It walks Mapping (sidebar, Space on the clip selector, add / cancel / restart, damaged file added and as a replacement, filter and apply, clear, UV set, camera while playing, adding model files while playing and removing one, scrub and step, clip change, QC and back, close and reopen the project, quit while playing) and prints PASS / FAIL per step, with player errors and event-loop stalls. Pass the project as the only argument: macOS opens command-line paths as documents.
-4. By hand, on a real keyboard and mouse: Space with the clip list focused after choosing a clip; orbit, pan (right-drag and ⇧-drag) and pinch/scroll zoom on a trackpad; audio follows the screen you are on.
+   It walks Mapping (sidebar, Space on the clip selector, add / cancel / restart, damaged file added and as a replacement, filter and apply, clear, UV set, camera while playing, adding model files while playing and removing one, the Projectors tab while playing (add and set a projector, look through it, typing in a number, Space after Enter, back to Surfaces), scrub and step, clip change, QC and back, close and reopen the project, quit while playing) and prints PASS / FAIL per step, with player errors and event-loop stalls. Pass the project as the only argument: macOS opens command-line paths as documents.
+4. By hand, on a real keyboard and mouse: Space with the clip list focused after choosing a clip; typing in a projector number then Enter, then Space; orbit, pan (right-drag and ⇧-drag) and pinch/scroll zoom on a trackpad; audio follows the screen you are on.
 5. Publish (`gh release create vX.Y.Z dist/nitpix-X.Y.Z.dmg`), then check that the in-app update check offers it and that `install.sh` with `NITPIX_INSTALL_DIR=<scratch> NITPIX_NO_OPEN=1` installs it.
 
 ## Licence

@@ -13,8 +13,13 @@ stops the file being read and those still queued: an Add keeps the files already
 leaves the stage as it was. Remove takes one file's objects off the stage; files on disk are only
 ever read.
 
-Session only for now: the imported stage, the assignments and the camera last while the
-app runs and are not saved with the project.
+Two tabs beside the shared view and transport: Surfaces (the stage's files, objects and UV
+assignments) and Projectors (one virtual projector, nitpix/projector.py). The tab decides what the
+view shows: UV assignments, or the projector's picture on every surface (never both). Switching
+tabs only repaints; the clip, frame, camera, stage and assignments all stay.
+
+Session only for now: the imported stage, the assignments, the projector and the camera last while
+the app runs and are not saved with the project.
 """
 from __future__ import annotations
 
@@ -23,16 +28,19 @@ from dataclasses import dataclass, field
 
 from PySide6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QMenu, QSplitter, QStackedWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-                               QWidget)
+                               QLineEdit, QMenu, QSplitter, QStackedWidget, QTabWidget, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from .. import service
 from ..mapping import MIXED, Assignments, share
+from ..projector import from_view
 from ..sceneimport import Importer
 from ..stage import Stage, split_key
 from . import theme
 from .mapview import MAX_TEXTURE, MappingView
 from .playhead import Playhead
+from .projection import VISIBILITY_SIZE
+from .projectors import ProjectorPanel
 from .review import PosCtx, btn
 from .timeline import Timeline
 from .widgets import ElideLabel, repolish
@@ -83,6 +91,8 @@ class MappingScreen(QWidget):
         self.stage = Stage()
         self.assign = None
         self._batch = None                     # the Add / Replace in progress
+        self.projector = None                  # nitpix.projector.Projector, or None
+        self.clip_aspect = None                # the mapped clip's display width / height
         self._pending_frame = 0                # where a newly loaded clip is to be shown
         self.importer = Importer(self._imported.emit)
         self._imported.connect(self._on_imported, Qt.ConnectionType.QueuedConnection)
@@ -153,6 +163,9 @@ class MappingScreen(QWidget):
         self.tex_lab = ElideLabel("")
         self.tex_lab.setFont(theme.mono(11))
         self.tex_lab.setProperty("muted", True)
+        self.mode_lab = QLabel()                              # what the view is showing: says the tab
+        self.mode_lab.setProperty("muted", True)
+        info.addWidget(self.mode_lab)
         info.addWidget(self.tex_lab, 1)
         self.hint_lab = ElideLabel(CAMERA_HINT)               # until the camera is first moved this session
         self.hint_lab.setProperty("faint", True)
@@ -289,7 +302,24 @@ class MappingScreen(QWidget):
         self.remove_btn.hide()
         il.addWidget(self.remove_btn)
         rlay.addWidget(insp)
-        split.addWidget(right)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.addTab(right, "Surfaces")
+        self.tabs.setTabToolTip(0, "The stage's files and objects, and which show the clip through their own UVs.")
+        self.proj_panel = ProjectorPanel()
+        self.tabs.addTab(self.proj_panel, "Projectors")
+        self.tabs.setTabToolTip(1, "One virtual projector casting the clip onto every surface (UVs not needed).")
+        self.tabs.currentChanged.connect(self._on_tab)
+        p = self.proj_panel
+        p.add_models_requested.connect(self.add_dialog)
+        p.add_requested.connect(self.add_projector)
+        p.from_view_requested.connect(self.projector_from_view)
+        p.remove_requested.connect(self.remove_projector)
+        p.changed.connect(self.edit_projector)
+        p.look_requested.connect(lambda on: self.view.look_through(on))
+        p.done_editing.connect(lambda: self.view.setFocus())
+        self.view.look_changed.connect(p.set_looking)
+        split.addWidget(self.tabs)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 1)
         split.setSizes([900, 340])
@@ -297,6 +327,7 @@ class MappingScreen(QWidget):
         self._show_objects()
         self._import_ui(False)
         self._refresh_controls()
+        self._on_tab(0)
 
     # ---- workspace lifecycle -----------------------------------------------------------------
     def activate(self, handoff=None):
@@ -330,6 +361,7 @@ class MappingScreen(QWidget):
         self.asset = self.ctx = None
         self._replace_with([])
         self.result.hide()
+        self.remove_projector()
         self.media_box.clear()
         self.tc_lab.setText("--:--:--:--")
         self.tc_sub.setText("")
@@ -371,6 +403,9 @@ class MappingScreen(QWidget):
         self.playhead.begin(self.ctx.count, f, new=True)
         self._pending_frame = f
         self.timeline.set_asset(a, self.ctx)
+        w, h = a.get("width"), a.get("height")
+        self.clip_aspect = w / h if w and h else None          # the projector follows it unless set
+        self._projector_changed()
         self.timeline.set_frame(f)
         self._update_tc()
         i = self.media_box.findData(aid)
@@ -623,7 +658,9 @@ class MappingScreen(QWidget):
         return sids.pop() if len(sids) == 1 else None
 
     def _show_objects(self, message=None):
-        """The object list once there is a stage; before that, what to do next (or what happened)."""
+        """The object list once there is a stage; before that, what to do next (or what happened).
+        Called after every change to the stage, so the Projectors tab follows it too."""
+        self._projector_changed()
         has = bool(self.stage) and message is None
         self.objects.setCurrentIndex(1 if has else 0)
         self.filter.setEnabled(has)
@@ -935,6 +972,49 @@ class MappingScreen(QWidget):
         self._refresh_rows()
         self._refresh_controls()
         self._push()
+
+    # ---- projector ---------------------------------------------------------------------------
+    def _on_tab(self, i):
+        mode = "projectors" if i == 1 else "surfaces"
+        self.view.set_mode(mode)
+        self.mode_lab.setText("Projector preview" if mode == "projectors" else "UV assignments")
+        self.mode_lab.setToolTip("The view shows the projector's picture on every surface (UVs not used)." if mode == "projectors"
+                                 else "The view shows the clip on assigned objects through their own UVs.")
+
+    def add_projector(self):
+        """A projector where the view's camera is, aimed where it looks."""
+        self.projector = None
+        self.projector_from_view()
+
+    def projector_from_view(self):
+        v = self.view
+        eye, tgt = v._eye(), v.cam_target
+        if v.looking_through and self.projector is not None:       # already looking through: nothing to take
+            return
+        self.projector = from_view((eye.x(), eye.y(), eye.z()), (tgt.x(), tgt.y(), tgt.z()), 40.0,
+                                   max(1, v.width()) / max(1, v.height()),
+                                   (self.projector.image_aspect(self.clip_aspect) if self.projector else self.clip_aspect or 16 / 9),
+                                   base=self.projector)
+        self._projector_changed()
+
+    def edit_projector(self, fields):
+        if self.projector is not None:
+            self.projector = self.projector.with_(**fields)
+            self._projector_changed()
+
+    def remove_projector(self):
+        """The projector goes; the stage, its files and the UV assignments are untouched."""
+        self.view.look_through(False)
+        self.projector = None
+        self._projector_changed()
+
+    def _projector_changed(self):
+        self.view.set_projector(self.projector, self.clip_aspect)
+        vis = None
+        if self.projector is not None:
+            a = self.projector.image_aspect(self.clip_aspect)
+            vis = (VISIBILITY_SIZE, max(1, round(VISIBILITY_SIZE / a)))
+        self.proj_panel.show_state(bool(self.stage), self.projector, self.clip_aspect, vis)
 
     # ---- keyboard ------------------------------------------------------------------------------
     def closed_selector(self, w) -> bool:

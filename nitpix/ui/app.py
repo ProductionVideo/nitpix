@@ -1331,6 +1331,68 @@ def _mapping_check(app, win, stage: str, shot: str):
             check(f"Removed {gone.name} while playing: only its objects went", ms().stage.source(gone.id) is None
                   and len(ms().assign.uv) == n - len(gone.objects) and not ms().view.paused, ms().scene_lab.text())
         add(s_remove, 800)
+
+    # Projectors: the other tab, while it plays; the stage, clip and UV assignments stay.
+    pj = {}
+    def s_projectors():
+        v = ms().view
+        pj.update(path=v.m.path, uv=dict(ms().assign.uv), frame=v.frame)
+        ms().tabs.setCurrentIndex(1)
+        ms().add_projector()
+        p = ms().proj_panel
+        for spin, val in zip(p.pos + p.tgt, (0.0, 2.5, 9.0, 0.0, 2.0, 0.0)):
+            spin.setValue(val)
+        p.fov.setValue(35.0)
+    add(s_projectors, 1200)
+
+    def s_projected():
+        v = ms().view
+        pr = ms().projector
+        check("Projectors tab: projector added and set while playing; same clip, still playing",
+              v.mode == "projectors" and v.projecting() and pr.position == (0.0, 2.5, 9.0) and pr.h_fov == 35.0
+              and v.m.path == pj["path"] and not v.paused and v.frame > pj["frame"] and v.projection.rebuilds >= 1,
+              f"{ms().proj_panel.info.text().splitlines()[0]}; visibility built {v.projection.rebuilds}x")
+        win.grab().save(f"{base}-4-projector.png")
+        v.look_through(True)
+    add(s_projected, 800)
+
+    def s_through():
+        win.grab().save(f"{base}-5-through.png")
+        n = ms().view.projection.rebuilds
+        for i in range(30):
+            QTimer.singleShot(20 * i, lambda: ms().view.orbit(3, 0.5))
+        pj.update(rebuilds=n)
+    add(s_through, 1000)
+    add(lambda: check("Look through, then orbit: back to the orbit view, visibility reused",
+                      not ms().view.looking_through and ms().view.projection.rebuilds == pj["rebuilds"],
+                      f"built {ms().view.projection.rebuilds}x"), 10)
+
+    def s_spin():
+        spin = ms().proj_panel.pos[0]
+        played = ms().view.paused
+        spin.setFocus()
+        spin.selectAll()
+        for key, text in ((Qt.Key.Key_1, "1"), (Qt.Key.Key_Space, " ")):
+            for t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                QApplication.sendEvent(spin, QKeyEvent(t, key, Qt.KeyboardModifier.NoModifier, text))
+        pj.update(paused=played, view=win.current_view)
+        QApplication.sendEvent(spin, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier))
+    add(s_spin, 400)
+
+    def s_after_spin():
+        check("Typing 1 and Space in a number: no screen change, no play/pause; Enter commits it",
+              win.current_view == pj["view"] == "mapping" and ms().view.paused == pj["paused"]
+              and ms().projector.position[0] == 1.0, f"x = {ms().projector.position[0]}")
+        space(ms().view)
+    add(s_after_spin, 600)
+    add(lambda: (check("Space after leaving the number toggles playback", ms().view.paused != pj["paused"]),
+                 space(ms().view)), 600)
+
+    def s_back():
+        ms().tabs.setCurrentIndex(0)
+        check("Back to Surfaces: UV assignments shown again, clip unchanged",
+              ms().view.mode == "surfaces" and ms().assign.uv == pj["uv"] and ms().view.m.path == pj["path"])
+    add(s_back, 500)
     add(lambda: (ms().toggle_play() if not ms().view.paused else None, ms().playhead.scrub(100)), 800)
     add(lambda: ms().playhead.step(1), 600)
     add(lambda: (win.grab().save(f"{base}-2-mapped.png"), check("Paused, scrub to 100, step", ms().playhead.frame == ms().view.frame == 101,

@@ -249,7 +249,7 @@ def load_scene(path: str, cancel: threading.Event | None = None) -> NormalizedSc
         raise SceneImportError("This file has no surfaces to show media on.")
     no_uv = sum(1 for o in objects if o.uv_sets == 0)
     if no_uv:
-        warnings.append(f"{no_uv} object{'s' if no_uv > 1 else ''} without UVs (shown neutral).")
+        warnings.append(f"{no_uv} object{'s' if no_uv > 1 else ''} without UVs (neutral in Surfaces; a projector still lights them).")
     outside = sum(1 for o in objects if o.outside_0_1)
     if outside:
         warnings.append(f"{outside} object{'s' if outside > 1 else ''} with UVs partly outside the image (UV 1): "
