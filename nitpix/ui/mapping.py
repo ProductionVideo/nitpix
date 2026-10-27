@@ -18,8 +18,12 @@ assignments) and Projectors (one virtual projector, nitpix/projector.py). The ta
 view shows: UV assignments, or the projector's picture on every surface (never both). Switching
 tabs only repaints; the clip, frame, camera, stage and assignments all stay.
 
-Session only for now: the imported stage, the assignments, the projector and the camera last while
-the app runs and are not saved with the project.
+The setup is kept with the project (nitpix/ui/mapsetup.py, nitpix/mapsave.py): every model file
+is copied into the project as it is added (nitpix/models.py), and the stage, assignments, clip,
+tab, projector and camera are saved shortly after each change. Opening Mapping in a project
+restores them, reading the kept copies through the same import queue. A kept copy that is missing
+or has changed is listed as missing, with its saved settings held back, until it is relinked to a
+file (its assignments return only if it is the same model) or taken off the stage.
 """
 from __future__ import annotations
 
@@ -31,7 +35,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QFrame
                                QLineEdit, QMenu, QSplitter, QStackedWidget, QTabWidget, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import service
+from .. import mapsave, models, service
 from ..mapping import MIXED, Assignments, share
 from ..projector import from_view
 from ..sceneimport import Importer
@@ -40,15 +44,19 @@ from . import theme
 from .mapview import MAX_TEXTURE, MappingView
 from .playhead import Playhead
 from .projection import VISIBILITY_SIZE
+from .mapsetup import SetupSaver
 from .projectors import ProjectorPanel
 from .review import PosCtx, btn
 from .timeline import Timeline
 from .widgets import ElideLabel, repolish
 
 KEY = Qt.ItemDataRole.UserRole
+PANE_MARGINS = (14, 12, 4, 4)                  # inside each tab: clear of the splitter, the tab bar and the window edge
 SOURCE = Qt.ItemDataRole.UserRole + 1         # a model file's row: its source id
+MISSING = Qt.ItemDataRole.UserRole + 2        # ...of a saved model that is not on the stage
 MEDIA_KINDS = ("video", "sequence", "image")
-SESSION_NOTE = "Session only: the imported stage, its assignments and the camera are not saved with the project."
+SAVE_NOTE = ("Kept with the project: the model files (copied into it), the stage, assignments, clip, projector and "
+             "camera. Clips themselves stay where they are.")
 CAMERA_HINT = "Drag to orbit · ⇧-drag or right-drag to pan · scroll to zoom · F frames the stage"
 
 
@@ -75,12 +83,14 @@ class _Batch:
     read: list = field(default_factory=list)       # replace: scenes read, swapped in at the end
     failed: list = field(default_factory=list)     # (name, why)
     skipped: list = field(default_factory=list)    # (name, why): not read at all
+    notes: list = field(default_factory=list)      # more to say (a relinked file that differs)
+    unmatched: int = 0                             # saved assignments whose objects no longer exist
     cancelled: bool = False
 
 
 class MappingScreen(QWidget):
     status = Signal(str, bool)                 # toast text, is_error
-    _imported = Signal(int, object, object)    # from the importer's thread: generation, scene, error
+    _imported = Signal(int, object, object, object)   # from the importer's thread: generation, scene, error, resource
 
     def __init__(self, session: service.Session):
         super().__init__()
@@ -93,6 +103,14 @@ class MappingScreen(QWidget):
         self._batch = None                     # the Add / Replace in progress
         self.projector = None                  # nitpix.projector.Projector, or None
         self.clip_aspect = None                # the mapped clip's display width / height
+        self.resources = {}                    # resource id -> its record (nitpix/models.py)
+        self.src_res = {}                      # source id -> resource id
+        self.missing = {}                      # source id -> {resource, why, assign}: saved, not on the stage
+        self._restored_for = None              # the Project whose saved setup was read
+        self._saved_clip = None                # the saved clip, for the first activation after a restore
+        self._saved_camera = None
+        self._pending_assign = {}              # saved assignments for sources still being restored
+        self.saver = SetupSaver(self._document, self)
         self._pending_frame = 0                # where a newly loaded clip is to be shown
         self.importer = Importer(self._imported.emit)
         self._imported.connect(self._on_imported, Qt.ConnectionType.QueuedConnection)
@@ -131,10 +149,14 @@ class MappingScreen(QWidget):
         self.cancel_btn = btn("Cancel import", "", self.cancel_import)
         self.cancel_btn.hide()
         head.addWidget(self.cancel_btn)
-        note = QLabel("Session only: not saved")
-        note.setProperty("faint", True)
-        note.setToolTip(SESSION_NOTE)
-        head.addWidget(note)
+        self.save_lab = QLabel()
+        self.save_lab.setProperty("faint", True)
+        self.save_lab.setToolTip(SAVE_NOTE)
+        head.addWidget(self.save_lab)
+        self.retry_btn = btn("Retry save", "Try saving the Mapping setup into the project again", lambda: self.saver.retry())
+        self.retry_btn.hide()
+        head.addWidget(self.retry_btn)
+        self.saver.state_changed.connect(self._on_save_state)
         root.addLayout(head)
         self.problem_lab = QLabel()
         self.problem_lab.setWordWrap(True)
@@ -143,6 +165,7 @@ class MappingScreen(QWidget):
         root.addWidget(self.problem_lab)
 
         split = QSplitter(Qt.Orientation.Horizontal)
+        split.setHandleWidth(8)
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
@@ -154,7 +177,8 @@ class MappingScreen(QWidget):
         self.view.texture_changed.connect(self._on_texture)
         self.view.problem.connect(self._on_problem)
         self.view.setToolTip(CAMERA_HINT)
-        self.view.camera_input.connect(lambda: self.hint_lab.hide())   # learned; the view's tooltip still has it
+        self.view.camera_input.connect(lambda: self.hint_lab.hide())
+        self.view.camera_moved.connect(lambda: self.saver.changed(camera=True))   # learned; the view's tooltip still has it
         ll.addWidget(self.view, 1)
         self.playhead = Playhead(self.view, lambda: True, self)
         self.playhead.moved.connect(self._on_moved)
@@ -210,7 +234,7 @@ class MappingScreen(QWidget):
 
         right = QWidget()
         rlay = QVBoxLayout(right)
-        rlay.setContentsMargins(0, 0, 0, 0)
+        rlay.setContentsMargins(*PANE_MARGINS)
         rlay.setSpacing(6)
         frow = QHBoxLayout()
         self.filter = _Filter()
@@ -269,7 +293,7 @@ class MappingScreen(QWidget):
         insp.setObjectName("inspector")
         insp.setStyleSheet(f"QFrame#inspector {{ border-top: 1px solid {theme.T['line2']}; }}")
         il = QVBoxLayout(insp)
-        il.setContentsMargins(0, 8, 0, 0)
+        il.setContentsMargins(0, 10, 0, 0)
         il.setSpacing(6)
         self.sel_lab = ElideLabel("")
         self.sel_lab.setStyleSheet("font-weight: 600;")
@@ -331,10 +355,15 @@ class MappingScreen(QWidget):
 
     # ---- workspace lifecycle -----------------------------------------------------------------
     def activate(self, handoff=None):
-        """Become the one playback session. `handoff` (asset id, frame) is what QC was showing."""
+        """Become the one playback session. `handoff` (asset id, frame) is what QC was showing. The
+        first time in a project, the saved setup is restored and its clip wins over the handoff."""
         self.active = True
         self.refresh_media()
         aid, frame = handoff if handoff else (self.asset["id"] if self.asset else None, self.playhead.frame)
+        if self.session.project is not None and self._restored_for is not self.session.project:
+            saved = self.begin_restore()
+            if saved is not None and self.media_box.findData(saved) >= 0:
+                aid, frame = saved, (frame if handoff and handoff[0] == saved else None)
         if aid is None or self.media_box.findData(aid) < 0:
             aid = self.media_box.itemData(0) if self.media_box.count() else None
             frame = None
@@ -352,8 +381,18 @@ class MappingScreen(QWidget):
         self.view.unload()                    # stops decoding and audio; replies to old seeks are ignored
         return h
 
+    def flush(self) -> bool:
+        """Save now if there are unsaved changes (before the project closes or the app quits)."""
+        return self.saver.flush()
+
     def reset_project(self):
-        """Another project (or none): drop the stage, assignments, clip and any import in progress."""
+        """Another project (or none): drop the stage, assignments, clip and any import in progress.
+        The caller flushes first, while the old project is still open; nothing is written here."""
+        self.saver.unbind()
+        self._restored_for = None
+        self._saved_clip = self._saved_camera = None
+        self._pending_assign = {}
+        self.resources, self.src_res, self.missing = {}, {}, {}
         self._batch = None
         self.importer.cancel()
         self._import_ui(False)
@@ -367,9 +406,125 @@ class MappingScreen(QWidget):
         self.tc_sub.setText("")
 
     def shutdown(self):
+        self.flush()
+        self.saver.unbind()
         self.importer.cancel()
         self.playhead.stop()
         self.view.shutdown()
+
+    # ---- the saved setup --------------------------------------------------------------------
+    def begin_restore(self):
+        """Read this project's saved setup and start restoring it. Returns the saved clip's id (or None).
+        A project without one starts empty; one that cannot be read starts empty too, and its stored
+        text is set aside (never overwritten) before anything new is saved."""
+        p = self.session.project
+        self._restored_for = p
+        models.clean_incoming(str(p.folder))
+        raw = p.get_meta(mapsave.KEY)
+        if raw is None:
+            self.saver.bind(p)
+            return None
+        try:
+            doc = mapsave.validate(raw)
+        except mapsave.SetupError as e:
+            self.saver.bind(p, unreadable=raw)
+            self._on_problem(f"the saved Mapping setup could not be read ({e}). It is kept unchanged in the project; "
+                             "Mapping starts empty, and anything you set up now is saved beside it.")
+            return None
+        self.saver.bind(p)
+        self.saver.suspended = True
+        self._replace_with([])
+        self.stage.next_id = doc["next_id"]
+        self.resources = dict(doc["resources"])
+        self._pending_assign = dict(doc["assignments"])
+        self._saved_clip = doc["clip"]
+        cam = doc["camera"]
+        if cam:
+            self._saved_camera = cam
+            self._apply_camera(cam)
+        self.projector = mapsave.projector_from(doc["projectors"][0]) if doc["projectors"] else None
+        self.tabs.setCurrentIndex(mapsave.TABS.index(doc["tab"]))
+        items = []
+        for s in doc["sources"]:
+            res = self.resources[s["resource"]]
+            path = models.resolve(str(p.folder), res)
+            if path is None or not os.path.isfile(path):
+                self._mark_missing(s["id"], s["resource"], "the copy kept in this project is missing" if path
+                                   else "its saved location is not inside this project")
+            else:
+                items.append({"path": path, "sid": s["id"], "rid": s["resource"]})
+        self._projector_changed()
+        self._start("restore", items)
+        return doc["clip"]
+
+    def _end_restore(self, b):
+        """After the last saved model was read (or the restore was cancelled): report, then save again normally."""
+        self.saver.suspended = False
+        self._pending_assign = {}
+        if self._saved_camera:
+            self._apply_camera(self._saved_camera)
+        self._changed()
+        self._show_objects()
+        self.saver.state = "saved"                    # restoring changed nothing that needs writing
+        self.saver.state_changed.emit("saved", "")
+        n_ok = len(b.added)
+        lines = []
+        if self.missing:
+            lines.append(f"{len(self.missing)} saved model file{'s' if len(self.missing) != 1 else ''} could not be restored:")
+            for sid, m in self.missing.items():
+                lines.append(f"✕ {self.resources.get(m['resource'], {}).get('name', sid)}: {m['why']}")
+            lines.append("Right-click a file marked missing to relink it or take it off the stage. Its saved settings are kept until then.")
+        if b.unmatched:
+            lines.append(f"{b.unmatched} saved assignment{'s' if b.unmatched != 1 else ''} no longer match an object and were not applied.")
+        if lines:
+            self.result_lab.setText("\n".join(lines))
+            self.result_lab.setToolTip("")
+            self.result_lab.setStyleSheet(f"color: {theme.T['warn']};")
+            self.result.show()
+            self.status.emit(f"Mapping restored {n_ok} of {n_ok + len(self.missing)} model files.", True)
+        elif n_ok:
+            self.status.emit(f"Mapping setup restored: {n_ok} model file{'s' if n_ok != 1 else ''}.", False)
+
+    def _apply_camera(self, cam):
+        from PySide6.QtGui import QVector3D
+        v = self.view
+        v.cam_target = QVector3D(*cam["target"])
+        v.yaw, v.pitch, v.dist = cam["yaw"], cam["pitch"], cam["dist"]
+        lo, hi = self.stage.bounds
+        v.radius = max(1e-3, 0.5 * ((hi[0] - lo[0]) ** 2 + (hi[1] - lo[1]) ** 2 + (hi[2] - lo[2]) ** 2) ** 0.5) if self.stage else v.radius
+        v._camera_changed()
+
+    def _document(self) -> dict:
+        """The setup as saved (nitpix/mapsave.py): only sources with a copy in the project, missing ones included."""
+        srcs = [{"id": s.id, "resource": self.src_res[s.id]} for s in self.stage.sources if s.id in self.src_res]
+        srcs += [{"id": sid, "resource": m["resource"]} for sid, m in self.missing.items()]
+        kept = {s["id"] for s in srcs}
+        assign = {k: v for k, v in (self.assign.uv if self.assign else {}).items() if k.partition(":")[0] in kept}
+        for m in self.missing.values():
+            assign.update(m["assign"])
+        v = self.view
+        return {"version": mapsave.VERSION,
+                "resources": {rid: r for rid, r in self.resources.items() if rid in {s["resource"] for s in srcs}},
+                "sources": srcs, "next_id": max([self.stage.next_id] + [int(k[1:]) + 1 for k in kept]),
+                "assignments": assign, "clip": self.asset["id"] if self.asset else self._saved_clip,
+                "tab": mapsave.TABS[self.tabs.currentIndex()],
+                "camera": {"yaw": v.yaw, "pitch": v.pitch, "dist": v.dist,
+                           "target": [v.cam_target.x(), v.cam_target.y(), v.cam_target.z()]},
+                "projectors": [mapsave.projector_to(self.projector)] if self.projector else []}
+
+    def _on_save_state(self, state, detail):
+        text = {"saved": "Saved in project", "pending": "Saving…", "error": "Not saved", "off": ""}[state]
+        self.save_lab.setText(text)
+        self.save_lab.setProperty("faint", state != "error")
+        self.save_lab.setStyleSheet(f"color: {theme.T['fail']};" if state == "error" else "")
+        self.save_lab.setToolTip(f"The Mapping setup could not be saved: {detail}" if state == "error" else SAVE_NOTE)
+        self.retry_btn.setVisible(state == "error")
+        if state == "error":
+            self._on_problem(f"the setup could not be saved into the project ({detail}). Your changes are still here; "
+                             "nitpix tries again with your next change, or use Retry save.")
+            self.status.emit("Mapping setup not saved: " + detail, True)
+        elif self.problem_lab.text().startswith("Mapping: the setup could not be saved"):
+            self._on_problem("")
 
     # ---- media ---------------------------------------------------------------------------
     def refresh_media(self):
@@ -389,6 +544,7 @@ class MappingScreen(QWidget):
         if aid is None or (self.asset and aid == self.asset["id"]):
             return
         self._load_media(aid, None)
+        self.saver.changed()
         self.status.emit(f"Mapping now shows {self.asset['name'] if self.asset else 'nothing'} on every assigned object", False)
 
     def _load_media(self, aid, frame):
@@ -461,29 +617,60 @@ class MappingScreen(QWidget):
             self.replace_stage(paths)
 
     def add_models(self, paths):
-        """Put these files on the stage as well, each as soon as it is read."""
-        self._start("add", paths)
+        """Put these files on the stage as well, each as soon as it is read (and kept in the project)."""
+        self._start("add", [{"path": p} for p in paths])
 
     def replace_stage(self, paths):
         """A new stage from these files; the current one stays until they are read."""
-        self._start("replace", paths)
+        self._start("replace", [{"path": p} for p in paths])
 
-    def _start(self, mode, paths):
+    def relink(self, sid, path):
+        """A file for a saved model that could not be restored. Its saved assignments come back only
+        if it is the same model (same bytes); otherwise it is added without them, and that is said."""
+        if sid in self.missing:
+            self._start("relink", [{"path": path, "sid": sid}])
+
+    def relink_dialog(self, sid):
+        m = self.missing.get(sid)
+        if m is None:
+            return
+        res = self.resources.get(m["resource"], {})
+        path, _ = QFileDialog.getOpenFileName(self, f"Find {res.get('name', 'the model')}", os.path.dirname(res.get("origin", "")),
+                                              "Stage models (*.obj *.fbx *.OBJ *.FBX)")
+        if path:
+            self.relink(sid, path)
+
+    def retry_restore(self, sids):
+        """Read saved models again from the copies kept in the project (after a cancelled restore)."""
+        p = self.session.project
+        items = []
+        for sid in sids:
+            m = self.missing.get(sid)
+            path = models.resolve(str(p.folder), self.resources.get(m["resource"], {})) if (m and p) else None
+            if path and os.path.isfile(path):
+                items.append({"path": path, "sid": sid, "rid": m["resource"]})
+        if items:
+            self._start("restore", items)
+
+    def _start(self, mode, items):
         if self._batch is not None:
             return
         queue, skipped, seen = [], [], set()
-        for p in paths:
+        for it in items:
+            p = it["path"]
             real, name = os.path.realpath(p), os.path.basename(p)
-            there = self.stage.has_path(p) if mode == "add" else None
+            there = self._already(p) if mode == "add" else None
             if there is not None:
                 skipped.append((name, f"already on the stage as {self.stage.label(there)}"))
             elif real in seen:
                 skipped.append((name, "chosen twice"))
             else:
                 seen.add(real)
-                queue.append(p)
+                queue.append(it)
         self._batch = _Batch(mode, queue, len(queue), skipped=skipped)
         self.result.hide()
+        if mode == "restore":
+            self.saver.suspended = True               # an incomplete stage must not replace the saved one
         if not queue:
             return self._finish()
         self._import_ui(True)
@@ -493,21 +680,33 @@ class MappingScreen(QWidget):
         b = self._batch
         b.current = b.queue.pop(0)
         n = b.total - len(b.queue)
-        name = os.path.basename(b.current)
-        what = ("Adding" if b.mode == "add" else "Reading") + (f" {n} of {b.total}: " if b.total > 1 else " ") + name + "…"
+        name = self._item_name(b.current)
+        verb = {"add": "Adding", "replace": "Reading", "restore": "Restoring", "relink": "Relinking"}[b.mode]
+        what = verb + (f" {n} of {b.total}: " if b.total > 1 else " ") + name + "…"
         self.scene_lab.setText(what)
-        if not self.stage:                    # a stage on show keeps its list while files are read
+        if not self.stage and not self.missing:       # a stage on show keeps its list while files are read
             self._show_objects(f"{what}\nPlayback carries on meanwhile.")
-        self.importer.start(b.current)
+        keep = str(self.session.project.folder) if (b.mode != "restore" and self.session.project) else None
+        self.importer.start(b.current["path"], keep)
+
+    def _item_name(self, item):
+        if item.get("rid") and item["rid"] in self.resources:
+            return self.resources[item["rid"]]["name"]
+        return os.path.basename(item["path"])
 
     def cancel_import(self):
-        """Stop the file being read and any still queued. An Add keeps what it already added."""
+        """Stop the file being read and any still queued. An Add keeps what it already added; a
+        restore leaves the rest listed as not restored, with their saved settings kept."""
         if self._batch is None:
             return
         self.importer.cancel()
-        self._batch.cancelled = True
-        self._batch.skipped += [(os.path.basename(p), "not read") for p in [self._batch.current, *self._batch.queue]]
-        self._batch.queue = []
+        b = self._batch
+        b.cancelled = True
+        for it in [b.current, *b.queue]:
+            b.skipped.append((self._item_name(it), "not read"))
+            if b.mode == "restore":
+                self._mark_missing(it["sid"], it["rid"], "not restored: the restore was cancelled")
+        b.queue = []
         self._finish()
 
     def _import_ui(self, busy):
@@ -520,17 +719,45 @@ class MappingScreen(QWidget):
         if not busy:
             self.scene_lab.setText(self._scene_text())
 
-    def _on_imported(self, gen, scene, error):
+    def _on_imported(self, gen, scene, error, resource):
         b = self._batch
         if b is None or gen != self.importer.generation:
             return                                    # cancelled, superseded, or another project
-        name = os.path.basename(b.current)
+        it = b.current
+        name = self._item_name(it)
         if error:
             b.failed.append((name, error))
+            if b.mode == "restore":
+                self._mark_missing(it["sid"], it["rid"], f"could not be read: {error}")
         elif b.mode == "add":
-            b.added.append(self._add_scene(scene))
-        else:
-            b.read.append(scene)
+            b.added.append(self._add_scene(scene, self._register(resource)))
+        elif b.mode == "replace":
+            b.read.append((scene, self._register(resource)))
+        elif b.mode == "restore":
+            if scene.source.get("sha256") != self.resources[it["rid"]]["sha256"]:
+                b.failed.append((name, "the copy kept in this project has changed since it was saved"))
+                self._mark_missing(it["sid"], it["rid"], "the copy kept in this project has changed since it was saved")
+            else:
+                self._forget_missing_row(it["sid"])
+                held = self.missing.pop(it["sid"], None)          # tried again after a cancelled restore
+                saved = held["assign"] if held else {k: v for k, v in self._pending_assign.items() if k.startswith(it["sid"] + ":")}
+                src = self._add_scene(scene, it["rid"], sid=it["sid"])
+                b.added.append(src)
+                b.unmatched += self._reapply(src, saved)
+        else:                                         # relink
+            sid = it["sid"]
+            m = self.missing[sid]
+            rid = self._register(resource)
+            same = resource["sha256"] == self.resources[m["resource"]]["sha256"]
+            self._forget_missing_row(sid)
+            self.missing.pop(sid)
+            src = self._add_scene(scene, rid, sid=sid)
+            b.added.append(src)
+            if same:
+                b.unmatched += self._reapply(src, m["assign"])
+            elif m["assign"]:
+                b.notes.append(f"{name} is not the model that was saved (different contents), so its "
+                               f"{len(m['assign'])} saved assignment{'s' if len(m['assign']) != 1 else ''} were not applied.")
         if b.queue:
             self._next()
         else:
@@ -539,14 +766,21 @@ class MappingScreen(QWidget):
     def _finish(self):
         b, self._batch = self._batch, None
         if b.mode == "replace" and b.read and not b.cancelled:
-            self._replace_with(b.read)                # once, with every file that could be used
+            self._replace_with([s for s, _r in b.read], [r for _s, r in b.read])   # once, with every file that could be used
         self._import_ui(False)
+        if b.mode == "restore":
+            self._end_restore(b)
+            return
+        if b.mode == "relink":
+            self._changed()
         text, bad = self._summary(b)
         new = self.stage.sources if b.mode == "replace" and b.read and not b.cancelled else b.added
         notes = [f"{self.stage.label(s)}: {w}" for s in new for w in s.scene.warnings]
+        notes += [f"{self.stage.label(s)}: material library {m}" for s in new for m in self.resources.get(self.src_res.get(s.id), {}).get("missing", [])]
+        notes += b.notes
         if text:
             self.status.emit(text if not notes else f"{text} {' '.join(notes)}", bad)
-        if not self.stage:
+        if not self.stage and not self.missing:
             self._show_objects(text or None)
         else:
             self._show_objects()
@@ -557,27 +791,30 @@ class MappingScreen(QWidget):
         """Above the list, until dismissed: a count, then one short line per file that needs a look
         (the list already names the files added). The full wording is in the tooltip and the toast."""
         cut = lambda t: t if len(t) <= 90 else t[:89].rstrip() + "…"
-        n = len(b.added) if b.mode == "add" else len(b.read)
+        n = len(b.added) if b.mode in ("add", "restore", "relink") else len(b.read)
+        verb = {"add": "added.", "restore": "restored.", "relink": "relinked."}.get(b.mode)
         head = (("Cancelled: " if b.cancelled else "") + f"{n} of {b.total} model file{'s' if b.total != 1 else ''} "
-                + ("added." if b.mode == "add" else "read; the stage was replaced." if n and not b.cancelled else "read; the stage is unchanged."))
+                + (verb or ("read; the stage was replaced." if n and not b.cancelled else "read; the stage is unchanged.")))
         lines = [head] if b.total else []
         lines += [cut(f"✕ {name}: {why}") for name, why in b.failed]
         lines += [cut(f"– {name}: {why}") for name, why in b.skipped]
         lines += [cut(f"· {note}") for note in notes]
+        if self.missing:
+            lines.append("Right-click a file marked missing to relink it or take it off the stage.")
         self.result_lab.setText("\n".join(lines))
         self.result_lab.setToolTip(text + "".join(f"\n{note}" for note in notes))
         self.result_lab.setStyleSheet(f"color: {theme.T['warn' if bad else 'muted']};")
         self.result.show()
 
     def _summary(self, b) -> tuple[str, bool]:
-        """What an Add or Replace did, for the person who started it, and whether anything went wrong."""
+        """What an Add, Replace or Relink did, for the person who started it, and whether anything went wrong."""
         def names(xs):
             xs = list(xs)
             return xs[0] if len(xs) == 1 else ", ".join(xs[:-1]) + " and " + xs[-1]
         failed = " ".join(f"{n} could not be used: {why}" + ("" if why.endswith(".") else ".") for n, why in b.failed)
         skipped = [(n, why) for n, why in b.skipped if why != "not read"]
         unread = [n for n, why in b.skipped if why == "not read"]
-        added = [self.stage.label(s) for s in b.added]
+        added = [self.stage.label(s) for s in b.added if self.stage.source(s.id) is s]
         parts = []
         if b.mode == "add":
             if b.cancelled:
@@ -585,6 +822,11 @@ class MappingScreen(QWidget):
                              + (" (kept on the stage)" if b.added else "") + (f"; {names(unread)} not read." if unread else "."))
             elif b.added:
                 parts.append(f"Added {names(added)}." if not b.failed else f"Added {len(added)} of {b.total} model files: {names(added)}.")
+        elif b.mode == "relink":
+            if b.added:
+                parts.append(f"Relinked {names(added)}" + (", with its saved assignments." if not b.notes else "."))
+            elif b.cancelled:
+                parts.append("Relink cancelled: still missing.")
         else:
             if b.cancelled:
                 parts.append("Replace cancelled: the stage is unchanged.")
@@ -599,13 +841,19 @@ class MappingScreen(QWidget):
         return " ".join(parts), bad
 
     # ---- the stage -------------------------------------------------------------------------
-    def _add_scene(self, scene):
-        """One more model file on the stage. Everything already there stays as it is."""
-        first = not self.stage
+    def _add_scene(self, scene, rid=None, sid=None):
+        """One more model file on the stage (`rid`: its copy in the project; `sid`: a saved source
+        id being restored). Everything already there stays as it is."""
+        first = not self.stage and self._saved_camera is None
         if self.assign is None:
             self.assign = Assignments(self.stage)
-        src = self.stage.add(scene)
+        if rid:
+            scene.source["origin"] = self.resources[rid]["origin"]      # shown and compared; the copy is what was read
+        src = self.stage.add(scene, sid)
+        if rid:
+            self.src_res[src.id] = rid
         self.view.set_scene(self.stage, frame=first)  # only the new meshes are uploaded; the camera stays
+        self.saver.changed()
         self._add_rows(src)
         self._relabel()
         self._apply_filter(self.filter.text())
@@ -613,14 +861,20 @@ class MappingScreen(QWidget):
         self._show_objects()
         return src
 
-    def _replace_with(self, scenes):
-        """A new stage of these scenes (none: empty). Assignments and the filter start again; source
-        ids carry on, so no id means two different files in one session."""
+    def _replace_with(self, scenes, rids=None):
+        """A new stage of these scenes (none: empty). Assignments, missing files and the filter start
+        again; source ids carry on, so no id means two different files in one session."""
         self.tree.clear()                             # rows (and the selection) go while their objects still exist
-        self.stage = Stage(next_id=self.stage.next_id)
-        for sc in scenes:
-            self.stage.add(sc)
+        self.stage = Stage(next_id=max([self.stage.next_id] + [int(k[1:]) + 1 for k in self.missing]))
+        self.src_res, self.missing = {}, {}
+        for sc, rid in zip(scenes, rids or [None] * len(scenes)):
+            if rid:
+                sc.source["origin"] = self.resources[rid]["origin"]
+            src = self.stage.add(sc)
+            if rid:
+                self.src_res[src.id] = rid
         self.assign = Assignments(self.stage) if self.stage else None
+        self.saver.changed()
         self.filter.clear()
         self.view.set_scene(self.stage if self.stage else None)
         self._fill_tree()
@@ -636,8 +890,10 @@ class MappingScreen(QWidget):
                 self.tree.takeTopLevelItem(i)
                 break
         src = self.stage.remove(sid)
+        self.src_res.pop(sid, None)                   # the copy in the project stays (removal deletes nothing)
         self.assign.prune()
         self.view.set_scene(self.stage if self.stage else None, frame=False)
+        self.saver.changed()
         if not self.stage:
             self.assign = None
         self._relabel()
@@ -646,6 +902,43 @@ class MappingScreen(QWidget):
         self.scene_lab.setText(self._scene_text())
         self.replace_btn.setEnabled(bool(self.stage) and self._batch is None)
         self.status.emit(f"Removed {src.name} from the stage (the file is unchanged).", False)
+
+    def forget_missing(self, sid):
+        """Take a saved model that could not be restored off the stage, with its saved settings."""
+        m = self.missing.pop(sid, None)
+        if m is not None:
+            self._forget_missing_row(sid)
+            self.saver.changed()
+            self._show_objects()
+            self.status.emit(f"Took {self.resources.get(m['resource'], {}).get('name', sid)} off the stage.", False)
+
+    def _already(self, path):
+        """The source on the stage that was read from this file, if any."""
+        real = os.path.realpath(path)
+        for src in self.stage.sources:
+            if os.path.realpath(src.origin) == real:
+                return src
+        return None
+
+    def _register(self, resource):
+        if not resource:
+            return None
+        rec = {k: resource[k] for k in ("path", "name", "sha256", "size", "origin", "sidecars", "missing")}
+        self.resources[resource["id"]] = rec
+        return resource["id"]
+
+    def _reapply(self, src, saved) -> int:
+        """Saved assignments onto a restored source's objects; how many no longer match one."""
+        lost = 0
+        if self.assign is None:
+            self.assign = Assignments(self.stage)
+        for k, uv in saved.items():
+            o = self.stage.object(k)
+            if o is not None and src.objects and k.startswith(src.id + ":") and uv < o.uv_sets:
+                self.assign.uv[k] = uv
+            else:
+                lost += 1
+        return lost
 
     def remove_selected_source(self):
         sid = self._selected_source()
@@ -661,7 +954,7 @@ class MappingScreen(QWidget):
         """The object list once there is a stage; before that, what to do next (or what happened).
         Called after every change to the stage, so the Projectors tab follows it too."""
         self._projector_changed()
-        has = bool(self.stage) and message is None
+        has = (bool(self.stage) or bool(self.missing)) and message is None
         self.objects.setCurrentIndex(1 if has else 0)
         self.filter.setEnabled(has)
         self.shown_btn.setEnabled(has)
@@ -676,7 +969,7 @@ class MappingScreen(QWidget):
             self.scene_lab.setToolTip("")
             return "No stage imported"
         tris = sum(o.triangles for o in s.objects)
-        self.scene_lab.setToolTip("\n".join(src.path for src in s.sources))
+        self.scene_lab.setToolTip("\n".join(src.origin for src in s.sources))
         what = s.label(s.sources[0]) if len(s.sources) == 1 else f"{len(s.sources)} model files"
         return f"{what}: {len(s.objects)} objects, {tris:,} triangles"
 
@@ -685,6 +978,8 @@ class MappingScreen(QWidget):
         self.tree.clear()
         for src in self.stage.sources:
             self._add_rows(src)
+        for sid in self.missing:
+            self._add_missing_row(sid)
         self._relabel()
         self._apply_filter(self.filter.text())
 
@@ -720,6 +1015,36 @@ class MappingScreen(QWidget):
         self._refresh_rows()
         self._refresh_controls()
 
+    def _add_missing_row(self, sid):
+        """A saved model that is not on the stage: its name, why, and (right-click) what to do."""
+        m = self.missing[sid]
+        res = self.resources.get(m["resource"], {})
+        top = QTreeWidgetItem([f"{res.get('name', sid)} — missing", f"{len(m['assign'])} saved" if m["assign"] else ""])
+        top.setData(0, SOURCE, sid)
+        top.setData(0, MISSING, True)
+        top.setFlags(top.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        for c in range(2):
+            top.setForeground(c, theme.colour("warn"))
+        top.setToolTip(0, f"Not on the stage: {m['why']}.\nKept in the project as {res.get('path', '?')}"
+                          f"\nOriginally {res.get('origin', '?')}\n{len(m['assign'])} saved assignment(s) held back."
+                          "\nRight-click to relink it to a file or take it off the stage.")
+        self.tree.addTopLevelItem(top)
+
+    def _mark_missing(self, sid, rid, why):
+        """A saved model that did not come back; its saved assignments are held, not dropped."""
+        prior = self.missing.get(sid, {}).get("assign")
+        assign = prior if prior is not None else {k: v for k, v in self._pending_assign.items() if k.startswith(sid + ":")}
+        self._forget_missing_row(sid)
+        self.missing[sid] = {"resource": rid, "why": why, "assign": assign}
+        self._add_missing_row(sid)
+
+    def _forget_missing_row(self, sid):
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            if it.data(0, SOURCE) == sid and it.data(0, MISSING):
+                self.tree.takeTopLevelItem(i)
+                return
+
     def _relabel(self):
         """File rows named so that two files with one name can be told apart."""
         for i in range(self.tree.topLevelItemCount()):
@@ -729,7 +1054,8 @@ class MappingScreen(QWidget):
                 continue
             top.setText(0, self.stage.label(src))
             tris = sum(o.triangles for o in src.objects)
-            tip = (f"{src.path}\n{len(src.objects)} objects, {tris:,} triangles · {src.scene.importer}"
+            kept = f"\nKept in the project as {self.resources[self.src_res[src.id]]['path']}" if src.id in self.src_res else ""
+            tip = (f"{src.origin}{kept}\n{len(src.objects)} objects, {tris:,} triangles · {src.scene.importer}"
                    + "".join(f"\n{w}" for w in src.scene.warnings) + "\nClick to select its objects; right-click to remove it.")
             top.setToolTip(0, tip)
 
@@ -742,6 +1068,17 @@ class MappingScreen(QWidget):
         it = self.tree.itemAt(pos)
         while it is not None and it.parent() is not None:
             it = it.parent()
+        if it is not None and it.data(0, MISSING):
+            sid = it.data(0, SOURCE)
+            name = self.resources.get(self.missing[sid]["resource"], {}).get("name", sid)
+            m = QMenu(self)
+            m.addAction(f"Relink {name}…", lambda: self.relink_dialog(sid))
+            kept = models.resolve(str(self.session.project.folder), self.resources.get(self.missing[sid]["resource"], {})) if self.session.project else None
+            if kept and os.path.isfile(kept):
+                m.addAction("Try restoring it again", lambda: self.retry_restore([sid]))
+            m.addAction(f"Take {name} off the stage", lambda: self.forget_missing(sid))
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         src = self.stage.source(it.data(0, SOURCE)) if it is not None else None
         if src is None:
             return
@@ -792,6 +1129,8 @@ class MappingScreen(QWidget):
         def walk(it) -> bool:
             k = it.data(0, KEY)
             shown = any([walk(it.child(i)) for i in range(it.childCount())])
+            if it.data(0, MISSING):                   # a missing file has no objects to match: shown unless filtered out by name
+                shown = not t or t in it.text(0).lower()
             if k:
                 shown = shown or not t or t in k.lower() or t in it.text(0).lower()
             it.setHidden(not shown)
@@ -910,7 +1249,7 @@ class MappingScreen(QWidget):
             name = self.stage.label(src)
             self.remove_btn.setText(f"Remove {name} from stage")
             self.remove_btn.setToolTip(f"Take {name} and its {len(src.objects)} objects (and their assignments) off the stage. "
-                                       f"The file itself is not changed.\n{src.path}")
+                                       f"The file itself is not changed.\n{src.origin}")
 
     def _selection_warning(self, eligible):
         """For the selection, in the UV set chosen (or each object's own when mixed): which parts
@@ -972,11 +1311,14 @@ class MappingScreen(QWidget):
         self._refresh_rows()
         self._refresh_controls()
         self._push()
+        self.saver.changed()
 
     # ---- projector ---------------------------------------------------------------------------
     def _on_tab(self, i):
         mode = "projectors" if i == 1 else "surfaces"
         self.view.set_mode(mode)
+        if hasattr(self, "saver"):
+            self.saver.changed()
         self.mode_lab.setText("Projector preview" if mode == "projectors" else "UV assignments")
         self.mode_lab.setToolTip("The view shows the projector's picture on every surface (UVs not used)." if mode == "projectors"
                                  else "The view shows the clip on assigned objects through their own UVs.")
@@ -996,17 +1338,21 @@ class MappingScreen(QWidget):
                                    (self.projector.image_aspect(self.clip_aspect) if self.projector else self.clip_aspect or 16 / 9),
                                    base=self.projector)
         self._projector_changed()
+        self.saver.changed()
 
     def edit_projector(self, fields):
         if self.projector is not None:
             self.projector = self.projector.with_(**fields)
             self._projector_changed()
+            self.saver.changed()
 
     def remove_projector(self):
         """The projector goes; the stage, its files and the UV assignments are untouched."""
         self.view.look_through(False)
-        self.projector = None
+        had, self.projector = self.projector, None
         self._projector_changed()
+        if had is not None:
+            self.saver.changed()
 
     def _projector_changed(self):
         self.view.set_projector(self.projector, self.clip_aspect)

@@ -101,9 +101,21 @@ Rules and current limits:
 - **Preview resolution:** media over 3840 px on the long side is downscaled for this spatial preview; QC still plays it at full size.
 - **Colours are display-referred:** the same picture as the QC player, but unlit and shown as an 8-bit preview. This is not an LED processor simulation.
 - **One playback session at a time:** moving between QC and Mapping hands over the position, and only one of them plays.
-- **Session only:** the stage (all its model files), assignments, projector and camera last until you close the project or quit. Nothing is saved with the project yet.
+- **Kept with the project:** see *Saved with the project* below.
 - **Scenes containing lines or points** (splines, guides) are refused with an explanation. Export surfaces only.
 - **Out of scope:** UV offset/scale, separate media per object, animation, lighting/PBR, calibration, and output.
+
+#### Saved with the project
+
+Mapping keeps its setup in the project, so closing and reopening (or copying the project folder to another Mac) brings it back.
+
+- **Model files are copied into the project** as they are added, to `<project>.nitpix/models/<id>/`. The id comes from the file's contents, so two different `screen.obj` files never overwrite each other, and the same file added twice is stored once. OBJ material libraries (`mtllib`) in the model's own folder are copied beside it. A library that is missing, or outside that folder, is named in the import note. Textures are not copied: Mapping does not draw them. Your original files are only ever read. Where each one came from is recorded, but nothing needs it again.
+- **The setup is saved** shortly after each change: the files on the stage, in order, with their ids; UV assignments and UV sets; the clip; the tab; the projector; and the camera. A drag or a run of edits is one save. A last save happens when you close the project or quit. The top bar says **Saved in project**, **Saving…** or **Not saved**. When a save fails (a locked or read-only project, a full disk), the reason is shown with **Retry save**. Your setup stays as it is in the window, and the last saved one is untouched.
+- **Reopening restores it.** The first time you open Mapping in a project, its kept model files are read again in the background, as when adding them, and the saved clip comes back too. Imports that fail or are cancelled never change what is saved. Nothing is saved while a restore is under way.
+- **When a kept model is missing or has changed,** it is listed as *missing* with the reason, and its saved assignments are held back, not dropped. Right-click it to relink it to a file, try again, or take it off the stage. Its assignments come back only if the new file is the same model (same contents). Otherwise it is added without them, and the note says why.
+- **A saved setup that cannot be read** (from a newer nitpix, or damaged) is left as it is: Mapping starts empty and says so. Anything you then set up is saved beside it; the unreadable copy is set aside, not overwritten.
+- **Removing a file** takes it off the stage and out of the saved setup. Its copy stays in `models/`, and the original is never touched. Unused copies are not cleaned up automatically.
+- **Clips are not copied.** They stay where they are, as for QC, and a moved or missing clip is reported the usual way. A project folder copied to another Mac brings its models with it, not its media.
 
 #### Projectors
 
@@ -133,7 +145,7 @@ What works and what does not, as tested (generated fixtures, plus a survey of 37
 | **Imports, but shows little or no media** | Objects without UVs (about one model in six in the survey); UVs made for a repeating material or world-scaled rather than laid out for the media (about one in eight was mostly outside the image). The model needs a UV set for the media |
 | **Refused, with a reason** | FBX containing lines or points; files of lines or points only; damaged or empty files; FBX the importer cannot read (it names the FBX version) |
 | **Slow** | Stages of tens of thousands of objects: each object is drawn separately, so 20,000 objects run at about 8 frames/s and a 135,000-object venue model at about 1 frame/s (it also needed 14 GB). Export the screens you need, or join meshes that share a surface |
-| **Not supported** | Moving, rotating or scaling a model file in nitpix (export it where it belongs); adding one file twice; assigning per material slot; UV offset, scale, repeat or fitting; saving the stage, assignments and projector with the project; more than one projector, lens shift or projector data; other formats (glTF, USD, 3DS, Alembic) |
+| **Not supported** | Moving, rotating or scaling a model file in nitpix (export it where it belongs); adding one file twice; assigning per material slot; UV offset, scale, repeat or fitting; more than one projector; lens shift or projector data; other formats (glTF, USD, 3DS, Alembic) |
 
 `tests/fixtures/scenes/` has small generated stages to try it with (`stage.fbx`, `stage_cm_zup.fbx`, `stage.obj`). They include three screens, a floor, a truss without UVs, instances, duplicate names, a mirrored panel and UVs that run past 0–1. `uvedge.fbx` has UVs at and past the image's edge, tiled UVs and an object with two different UV sets. `parts/` is one stage exported as separate files: a centre screen (OBJ), side screens placed by their FBX node transforms (one authored in centimetres, Z up), a venue, and two `screen.obj` files in different folders. Add them together to try a composed stage. `projector/` (from `tools/scenes/make_projector_fixtures.py`) has stages without any UVs for the projector: a wall with a nearer occluder, a square facing away, a plaque 5 cm proud of the wall, a surface behind the projector, and a curved surface.
 

@@ -675,6 +675,8 @@ class MainWindow(QMainWindow):
 
     # ---- project lifecycle -------------------------------------------------------
     def open_project(self, path: str, name: str | None = None):
+        if self.mapping is not None:
+            self.mapping.flush()                   # into the project still open, before it closes
         try:
             self.session.open(path, name)
         except Exception as e:
@@ -738,6 +740,8 @@ class MainWindow(QMainWindow):
             self.session.jobs.scan_roots([str(loc["delivery"])])
 
     def close_project(self):
+        if self.mapping is not None:
+            self.mapping.flush()
         try:
             self._reset_mapping()
             self.review.player.unload()
@@ -1419,13 +1423,25 @@ def _mapping_check(app, win, stage: str, shot: str):
 
     def s_reopen():
         win._proj = win.session.project.folder
+        m = ms()
+        win._kept = ([(x.id, m.stage.label(x)) for x in m.stage.sources], dict(m.assign.uv) if m.assign else {},
+                     m.projector, m.asset["id"] if m.asset else None, m.tabs.currentIndex())
         win.close_project()
     add(s_reopen, 800)
-    add(lambda: check("Close project: Mapping reset, nothing loaded", ms().scene is None and not loaded_players()), 10)
-    add(lambda: (win.open_project(str(win._proj)), win.show_view("mapping")) if win._proj else None, 2000)
-    add(lambda: check("Reopen project: Mapping has no stage (session only) and a clip", ms().scene is None and ms().view.loaded), 10)
-    add(lambda: (ms().add_models([stage])), 300)
-    add(lambda: wait_import(lambda: (ms().apply_all(), ms().toggle_play())), 1500)
+    add(lambda: check("Close project: Mapping reset, nothing loaded", ms().scene is None and not loaded_players()
+                      and ms().saver.project is None), 10)
+    add(lambda: (win.open_project(str(win._proj)), win.show_view("mapping")) if win._proj else None, 800)
+
+    def s_restored():
+        m = ms()
+        now = ([(x.id, m.stage.label(x)) for x in m.stage.sources], dict(m.assign.uv) if m.assign else {},
+               m.projector, m.asset["id"] if m.asset else None, m.tabs.currentIndex())
+        check("Reopen project: the setup is restored (files, assignments, projector, clip, tab)",
+              now == win._kept and not m.missing and m.view.loaded and m.save_lab.text() == "Saved in project",
+              f"{m.scene_lab.text()}; {len(now[1])} assignments")
+        win.grab().save(f"{base}-6-restored.png")
+    add(lambda: wait_import(s_restored), 1500)
+    add(lambda: (ms().tabs.setCurrentIndex(0), ms().apply_all(), ms().toggle_play()), 1500)
 
     def s_quit():
         check("Playing before quit", not ms().view.paused)

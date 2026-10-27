@@ -429,7 +429,7 @@ class Composition(_Screen):
         ms.select(self.keys("a/screen.obj"))
         ms.remove_selected_source()
         self.assertEqual([s.name for s in ms.stage.sources], ["screen.obj", "centre.obj"])
-        self.assertEqual(ms.stage.sources[0].path, part("b/screen.obj"))
+        self.assertEqual(ms.stage.sources[0].origin, part("b/screen.obj"))   # path is now its copy in the project
         self.assertEqual(ms.tree.topLevelItem(0).text(0), "screen.obj")     # no longer needs its folder
         self.assertEqual(sorted(ms.assign.uv), self.keys("screen.obj"))     # b's assignment untouched
         self.assertEqual(self.said[-1], ("Removed screen.obj from the stage (the file is unchanged).", False))

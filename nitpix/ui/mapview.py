@@ -162,6 +162,7 @@ class MappingView(MpvWidget):
     problem = Signal(str)              # rendering cannot work as intended (shown to the user)
     camera_input = Signal()            # the user dragged or scrolled in the view
     look_changed = Signal(bool)        # looking through the projector, or back to the orbit camera
+    camera_moved = Signal()            # the orbit camera changed (by hand or by framing)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -301,6 +302,7 @@ class MappingView(MpvWidget):
 
     def _camera_changed(self):
         self.cam_version += 1
+        self.camera_moved.emit()
         self.update()
 
     def _eye(self) -> QVector3D:

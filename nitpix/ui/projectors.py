@@ -58,8 +58,8 @@ class ProjectorPanel(QWidget):
     def __init__(self):
         super().__init__()
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(8)
+        root.setContentsMargins(14, 12, 4, 4)       # as the Surfaces tab (nitpix/ui/mapping.py PANE_MARGINS)
+        root.setSpacing(10)
         intro = QLabel(INTRO)
         intro.setWordWrap(True)
         intro.setProperty("muted", True)
@@ -90,8 +90,8 @@ class ProjectorPanel(QWidget):
         # 2: the projector
         page = QWidget()
         pl = QVBoxLayout(page)
-        pl.setContentsMargins(0, 0, 0, 0)
-        pl.setSpacing(8)
+        pl.setContentsMargins(0, 4, 0, 0)
+        pl.setSpacing(10)
         checks = QHBoxLayout()
         checks.setSpacing(18)
         self.enabled = QCheckBox("Show projection")
@@ -106,8 +106,8 @@ class ProjectorPanel(QWidget):
         pl.addLayout(checks)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(6)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
         for c, axis in enumerate("XYZ"):
             h = QLabel(axis)
             h.setProperty("faint", True)
@@ -168,7 +168,7 @@ class ProjectorPanel(QWidget):
         pl.addWidget(self.remove_btn)
         pl.addStretch(1)
         self.pages.addWidget(page)
-        note = ElideLabel("Session only: the projector is not saved with the project.")
+        note = ElideLabel("Saved with the project's Mapping setup.")
         note.setProperty("faint", True)
         root.addWidget(note)
         self.show_state(False, None, None, None)
