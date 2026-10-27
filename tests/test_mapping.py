@@ -179,6 +179,66 @@ class Workspace(unittest.TestCase):
         self.assertTrue(pump(self.app, lambda: not self.ms.importer.busy and self.ms.import_btn.isEnabled(), 30))
         pump(self.app, timeout=0.05)
 
+    def test_empty_then_importing_then_objects(self):
+        ms = self.ms
+        self.assertEqual(ms.objects.currentIndex(), 0)                       # what to do next, with its own button
+        self.assertIn("Import an OBJ or FBX", ms.empty_lab.text())
+        self.assertTrue(ms.empty_import.isVisibleTo(ms))
+        self.assertFalse(ms.apply_btn.isEnabled())
+        self.assertFalse(ms.apply_btn.property("primary"))                   # no strong style on a button that cannot act
+        ms.import_scene(os.path.join(FIX, "stage.fbx"))
+        self.assertIn("Importing stage.fbx", ms.empty_lab.text())
+        self.assertTrue(ms.cancel_btn.isVisibleTo(ms))
+        self.assertTrue(pump(self.app, lambda: not ms.importer.busy and ms.import_btn.isEnabled(), 30))
+        pump(self.app, timeout=0.05)
+        self.assertEqual(ms.objects.currentIndex(), 1)
+        self.assertEqual(ms.all_btn.text(), "Apply to all 12 with UVs")
+
+    def test_a_scene_that_cannot_be_used_says_why_where_the_objects_would_be(self):
+        self.import_("garbage.fbx")
+        self.assertEqual(self.ms.objects.currentIndex(), 0)
+        self.assertIn("could not be used", self.ms.empty_lab.text())
+
+    def test_filter_keeps_selection_and_assignments(self):
+        ms = self.ms
+        self.import_("stage.fbx")
+        ms.select(["Stage/Floor"])
+        ms.filter.setText("scre")
+        shown = sorted(it.data(0, 0x0100) for it in ms._rows() if not ms._hidden(it))
+        self.assertEqual(shown, ["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"])   # by path, too
+        self.assertEqual(ms.selected_keys(), ["Stage/Floor"])               # still selected...
+        self.assertIn("1 hidden by the filter", ms.sel_lab.text())           # ...and it says so
+        ms.select_shown()
+        self.assertEqual(sorted(ms.selected_keys()), shown)
+        self.assertEqual(ms.apply_btn.text(), "Apply clip to 3 selected")
+        ms.apply_selected()
+        ms.filter.clear()
+        self.assertTrue(all(not ms._hidden(it) for it in ms._rows()))
+        self.assertEqual(sorted(ms.assign.uv), shown)
+        self.assertEqual(ms.clear_btn.text(), "Clear 3")
+
+    def test_inspector_names_the_clip_and_warns_for_the_selection(self):
+        ms = self.ms
+        self.import_("stage.fbx")
+        path = os.path.join(self.tmp, "real clip.mov")
+        open(path, "wb").close()                                             # present on disk; never decoded here
+        aid = self.session.project.upsert_asset(path, kind="video", name="real clip.mov", fps="25/1", frames=50, duration=2.0, scan_state="done")
+        ms.refresh_media()
+        ms._choose_media(aid)
+        self.assertEqual(ms.clip_lab.text(), "Clip: real clip.mov")
+        ms.select(["Stage/Spill"])
+        self.assertIn("about 31% of this surface would show neutral", ms.warn_lab.text())
+        self.assertFalse(ms.warn_lab.isHidden())
+        ms.apply_selected()
+        self.assertIn("shows neutral", ms.warn_lab.text())
+        self.assertIn("U -0.1 to 1.1", ms.warn_lab.toolTip())
+        rows = {it.data(0, 0x0100): it for it in ms._rows()}
+        self.assertEqual(rows["Stage/Spill"].text(1), "● UV 1 ⚠")
+        ms.select(["Stage/Screens/Centre"])
+        self.assertTrue(ms.warn_lab.isHidden())                              # nothing to say about a clean selection
+        ms.select(["Stage/Screens/Centre", "Stage/Spill", "Stage/Floor"])
+        self.assertIn("1 show the clip", ms.sel_lab.text())
+
     def test_media_list_offers_visual_media_only(self):
         self.ms.refresh_media()
         self.assertEqual([self.ms.media_box.itemText(i) for i in range(self.ms.media_box.count())], ["a.mov"])
@@ -189,8 +249,8 @@ class Workspace(unittest.TestCase):
         self.assertIsNotNone(ms.scene)
         rows = {it.data(0, 0x0100): it for it in ms._rows()}
         self.assertEqual(rows["Stage/Logo_A#2"].text(0), "Logo_A (2)")       # duplicates told apart
-        self.assertEqual(rows["Stage/Truss"].text(2), "no UVs: stays neutral")
-        self.assertEqual(rows["Stage/Spill"].text(2), "")                    # unassigned: no warning...
+        self.assertEqual(rows["Stage/Truss"].text(1), "no UVs")
+        self.assertEqual(rows["Stage/Spill"].text(1), "")                    # unassigned: no warning...
         self.assertIn("U -0.1 to 1.1", rows["Stage/Spill"].toolTip(0))       # ...the numbers in its tooltip
         ms.select(["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"])
         self.assertTrue(ms.apply_btn.isEnabled())
@@ -350,6 +410,31 @@ class OneSession(unittest.TestCase):
         self.assertFalse(ms.active)
         w.show_view("review")                                                # QC then shows the mapped clip
         self.assertEqual(w.review.asset["id"], self.b)
+
+    def test_typing_in_the_filter_never_reaches_the_transport(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        w = self.window()
+        w.set_mapping_enabled(True)
+        w.show_asset(self.a)
+        w.show_view("mapping")
+        ms = w.mapping
+        ms._set_scene(load_scene(os.path.join(FIX, "stage.fbx")), "stage.fbx")
+        toggles = []
+        ms.toggle_play = lambda: toggles.append(1)
+        ms.view.frame_all = lambda *a, **k: toggles.append("f")
+        ms.filter.setFocus()
+        pump(self.app, timeout=0.05)
+        QTest.keyClicks(ms.filter, "f ")
+        QTest.keyClick(ms.filter, Qt.Key.Key_Left)
+        self.assertEqual((ms.filter.text(), toggles), ("f ", []))
+        QTest.keyClick(ms.filter, Qt.Key.Key_Escape)                         # clears and leaves the field
+        self.assertEqual(ms.filter.text(), "")
+        ms.tree.setFocus()
+        pump(self.app, timeout=0.05)
+        QTest.keyClick(ms.tree, Qt.Key.Key_Space)                            # elsewhere the keys still work
+        QTest.keyClick(ms.tree, Qt.Key.Key_F)
+        self.assertEqual(toggles, [1, "f"])
 
     def test_close_project_resets_mapping(self):
         w = self.window()

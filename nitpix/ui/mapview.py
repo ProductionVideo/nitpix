@@ -126,6 +126,7 @@ class _Mesh:
 class MappingView(MpvWidget):
     texture_changed = Signal(object)   # (texture w, h, source w, h), or None
     problem = Signal(str)              # rendering cannot work as intended (shown to the user)
+    camera_input = Signal()            # the user dragged or scrolled in the view
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -232,6 +233,7 @@ class MappingView(MpvWidget):
     def mousePressEvent(self, e):
         pan = e.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton) or e.modifiers() & Qt.KeyboardModifier.ShiftModifier
         self._drag = ("pan" if pan else "orbit", e.position())
+        self.camera_input.emit()
 
     def mouseMoveEvent(self, e):
         if not self._drag:
@@ -248,6 +250,7 @@ class MappingView(MpvWidget):
         d = e.angleDelta().y() / 120 or e.pixelDelta().y() / 40
         if d:
             self.zoom(d)
+            self.camera_input.emit()
 
     # ---- video texture ---------------------------------------------------------------------
     def _on_video_params(self, name, val):

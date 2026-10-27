@@ -353,8 +353,37 @@ class Switching(unittest.TestCase):
             self.assertFalse(ms.view.loaded)
             self.assertEqual((qc_frame(), rv.frame, rv.player.frame), (target_map, target_map, target_map))
         w.show_view("mapping")
+        end = time.monotonic() + 10
+        while not (ms.view.loaded and not ms.view.scrub_pending()) and time.monotonic() < end:
+            pump(0.01)
+        ms.playhead.seek(0)
+        pump(0.3)
         ms.view.set_pause(False)
         pump(0.5)
+        self.assertFalse(ms.view.paused)                           # playing (and stays so to the quit below)
+        sent = []                                                  # editing while it plays: nothing reaches the player
+        orig = ms.view.m.command, ms.view.m.command_async
+        ms.view.m.command = lambda *a, **k: (sent.append(a), orig[0](*a, **k))[1]
+        ms.view.m.command_async = lambda *a, **k: (sent.append(a), orig[1](*a, **k))[1]
+        f0 = ms.view.frame
+        for text in ("scr", "screens", "", "floor", "", "zzz", ""):
+            ms.filter.setText(text)
+            ms.select_shown()
+            pump(0.03)
+        ms.select(["Stage/Screens/Left", "Stage/Screens/Right", "Stage/Spill"])
+        ms.apply_selected()
+        pump(0.05)
+        ms.select(["Stage/Screens/Centre"])
+        ms.uv_box.setCurrentIndex(ms.uv_box.findData(1))
+        ms._on_uv_chosen(ms.uv_box.currentIndex())
+        ms.select(["Stage/Screens/Left"])
+        ms.clear_selected()
+        pump(0.4)
+        ms.view.m.command, ms.view.m.command_async = orig
+        self.assertEqual(sent, [])
+        self.assertFalse(ms.view.paused)
+        self.assertGreater(ms.view.frame, f0 + 10)                # still advancing
+        self.assertEqual(ms.assign.uv, {"Stage/Screens/Centre": 1, "Stage/Screens/Right": 0, "Stage/Spill": 0})
         t = time.monotonic()
         w.close()                                                  # quit while Mapping plays
         self.assertLess(time.monotonic() - t, 3.0)

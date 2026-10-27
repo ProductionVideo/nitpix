@@ -81,11 +81,12 @@ Mapping shows a project's media on an imported stage model while it plays, so yo
 
 To use it:
 
-1. Choose the **mapped clip**: any video, image sequence or still in the project. Every assigned object shows that one clip, on one shared clock.
-2. **Import stage…** reads an OBJ or FBX file. The import runs in a separate process, so the window stays responsive. Cancel stops the import itself.
-3. Select objects in the list (⌘/⇧-click selects several), then choose **Apply current media**, **Clear assignment** or **Apply to all eligible objects**.
-4. Pick which of the object's own UV sets to use. The UVs are used exactly as authored.
-5. Use the usual transport keys (Space, ← →, ⇧← ⇧→, Home, End) and the timeline. Drag to orbit, right-drag or ⇧-drag to pan, scroll to zoom. **F** (Frame all) fits the whole stage in view; **Reset view** also returns to the front.
+1. Choose the **Clip** at the top: any video, image sequence or still in the project. Every assigned object shows that one clip, on one shared clock.
+2. **Import stage…** reads an OBJ or FBX file. The import runs in a separate process, so the window and playback carry on. Cancel stops the import itself.
+3. Find objects in the list. **Filter objects** matches names and paths (Esc clears it), and **Select shown** selects everything the filter shows. ⌘/⇧-click selects several. Filtering never changes the selection or assignments; the panel says when part of the selection is hidden.
+4. The panel below the list says what is selected, how much of it already shows the clip, and which clip **Apply clip to N selected** will use. **Clear N** returns objects to neutral, and **Apply to all N with UVs** assigns every object that can show media.
+5. Pick which of the objects' own UV sets to use. For objects already showing the clip the change applies at once. If the chosen set runs outside the image, the panel says how much of the surface is, or would be, neutral; its tooltip has the exact ranges.
+6. Use the usual transport keys (Space, ← →, ⇧← ⇧→, Home, End) and the timeline. Drag to orbit, right-drag or ⇧-drag to pan, scroll to zoom: the hint under the view goes once you have used it. **F** (Frame all) fits the whole stage in view; **Reset view** also returns to the front.
 
 Rules for this alpha:
 
@@ -100,7 +101,7 @@ Rules for this alpha:
 - **Scenes containing lines or points** (splines, guides) are refused with an explanation. Export surfaces only.
 - **Out of scope:** UV offset/scale, separate media per object, animation, lighting/PBR, projection or calibration, and output.
 
-`tests/fixtures/scenes/` has small generated stages to try it with (`stage.fbx`, `stage_cm_zup.fbx`, `stage.obj`). They include three screens, a floor, a truss without UVs, instances, duplicate names, a mirrored panel and UVs that run past 0–1.
+`tests/fixtures/scenes/` has small generated stages to try it with (`stage.fbx`, `stage_cm_zup.fbx`, `stage.obj`). They include three screens, a floor, a truss without UVs, instances, duplicate names, a mirrored panel and UVs that run past 0–1. `uvedge.fbx` has UVs at and past the image's edge, tiled UVs and an object with two different UV sets.
 
 ### Renamed from LHS-QC Review
 
