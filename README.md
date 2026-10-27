@@ -75,6 +75,32 @@ What an experimental build keeps separate:
 
 **It does not separate projects.** Opening a project in an experimental build edits that project's data (notes, review status, settings, scans), exactly as the release would. The same applies to the demo project in `~/nitpix Projects/demo`. Try experimental builds on a throwaway project, or a copy of one.
 
+### Mapping (experimental alpha)
+
+Mapping shows a project's media on an imported stage model while it plays, so you can check how content lands on screens. It exists only in experimental builds, and is off until you turn it on under Settings ▸ Experimental ▸ Mapping workspace. It then appears in the sidebar.
+
+To use it:
+
+1. Choose the **mapped clip**: any video, image sequence or still in the project. Every assigned object shows that one clip, on one shared clock.
+2. **Import stage…** reads an OBJ or FBX file. The import runs in a separate process, so the window stays responsive. Cancel stops the import itself.
+3. Select objects in the list (⌘/⇧-click selects several), then choose **Apply current media**, **Clear assignment** or **Apply to all eligible objects**.
+4. Pick which of the object's own UV sets to use. The UVs are used exactly as authored.
+5. Use the usual transport keys (Space, ← →, ⇧← ⇧→, Home, End) and the timeline. Drag to orbit, right-drag or ⇧-drag to pan, scroll to zoom. **F** (Frame all) fits the whole stage in view; **Reset view** also returns to the front.
+
+Rules for this alpha:
+
+- **Assignment is per object,** including all of its material slots. A stage exported as one object with screens as material slots must be split into objects before export.
+- **Outside UV 0–1 is always neutral grey.** Objects without UVs stay grey and are never given generated coordinates. The list warns about both cases, for the UV set chosen.
+- **Faces seen from behind are dark grey** and never show media.
+- **Preview resolution:** media over 3840 px on the long side is downscaled for this spatial preview; QC still plays it at full size.
+- **Colours are display-referred:** the same picture as the QC player, but unlit and shown as an 8-bit preview. This is not an LED processor simulation.
+- **One playback session at a time:** moving between QC and Mapping hands over the position, and only one of them plays.
+- **Session only:** the imported stage, assignments and camera last until you quit. Nothing is saved with the project.
+- **Scenes containing lines or points** (splines, guides) are refused with an explanation. Export surfaces only.
+- **Out of scope:** UV offset/scale, separate media per object, animation, lighting/PBR, projection or calibration, and output.
+
+`tests/fixtures/scenes/` has small generated stages to try it with (`stage.fbx`, `stage_cm_zup.fbx`, `stage.obj`). They include three screens, a floor, a truss without UVs, instances, duplicate names, a mirrored panel and UVs that run past 0–1.
+
 ### Renamed from LHS-QC Review
 
 Projects are `.nitpix` folders now; older `.lhsqc` folders still open. The recent-projects list is carried over on first launch. Environment variables are `NITPIX_*` (were `LHSQC_*`). IINfo sidecars written by the old name are still recognised. The built-in spec ids (e.g. `lhs_hd_prores_25`) are unchanged so saved projects keep their spec. Delivery specs were called presets before 0.5.5; only the name changed.
