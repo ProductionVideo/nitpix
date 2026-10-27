@@ -1201,81 +1201,153 @@ class MainWindow(QMainWindow):
 
 
 def _mapping_check(app, win, stage: str, shot: str):
-    """Verification of packaged builds: open Mapping from the sidebar; Space (a real key event
-    through the window's routing) with focus on the closed clip selector; import `stage` and
-    show the clip on every object with UVs; select and deselect while playing and orbiting;
-    scrub and step; QC -> Mapping -> QC. Counts every player error (GL errors surface there).
-    Grabs the window at each point (shot-1-mapping.png ... next to `shot`) and prints a log."""
+    """Verification of packaged builds: the Mapping journey, step by step, each logged PASS/FAIL.
+    Needs a project with two visual clips. Keys are real key events through the window's routing
+    (not physical keys). At every step: only one player holds a file (one source of sound), and
+    no player error; the longest event-loop stall is reported. Grabs the window at a few points
+    (shot-1-mapping.png ... next to `shot`). NITPIX_SCREENSHOT_SLOW names a model slow enough to
+    cancel mid-import, NITPIX_SCREENSHOT_BAD a damaged one. Ends by closing the window while
+    Mapping plays."""
+    import time as _time
     from PySide6.QtGui import QKeyEvent
     base = os.path.splitext(shot)[0]
-    log, errors = [], []
+    results, errors, gaps = [], [], [0.0]
+    tick = {"t": _time.monotonic()}
+
+    def beat():                                   # event-loop responsiveness while the journey runs
+        now = _time.monotonic()
+        gaps[0] = max(gaps[0], now - tick["t"])
+        tick["t"] = now
+    hb = QTimer(win)
+    hb.timeout.connect(beat)
+    hb.start(10)
     win.review.player.error.connect(errors.append)
 
-    def grab(name):
-        win.grab().save(f"{base}-{name}.png")
+    def ms():
+        return win.mapping
+
+    def loaded_players():
+        return [n for n, p in (("QC", win.review.player), ("Mapping", ms().view if ms() else None)) if p is not None and p.m is not None and p.m.path]
+
+    def check(name, ok, detail=""):
+        one = len(loaded_players()) <= 1
+        stall = f" (longest stall since the last check {gaps[0] * 1000:.0f} ms)" if gaps[0] > 0.1 else ""
+        gaps[0] = 0.0
+        results.append(("PASS" if ok and one else "FAIL", name, f"{detail}{'' if one else ' TWO PLAYERS LOADED'}{stall}"))
 
     def space(widget):
+        widget.setFocus()
         for t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             QApplication.sendEvent(widget, QKeyEvent(t, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier, " "))
 
-    def step(i=0):
-        ms = win.mapping
-        if i == 0:
-            win.nav["mapping"].click()
-            win.mapping.view.error.connect(errors.append)
-            log.append(f"sidebar -> {win.current_view}")
-            QTimer.singleShot(1500, lambda: step(1))
-        elif i == 1:
-            grab("1-mapping")
-            ms.media_box.setFocus()
-            space(ms.media_box)
-            QTimer.singleShot(800, lambda: step(2))
-        elif i == 2:
-            playing = not ms.view.paused
-            space(ms.media_box)
-            QTimer.singleShot(400, lambda: (log.append(f"Space on the clip selector: play {playing}, then paused "
-                                                       f"{ms.view.paused}, list open {ms.media_box.view().isVisible()}"), step(3)))
-        elif i == 3:
-            ms.import_scene(stage)
-            QTimer.singleShot(300, lambda: step(4))
-        elif i == 4:
-            if ms.importer.busy:
-                return QTimer.singleShot(200, lambda: step(4))
-            if not ms.scene:
-                log.append("import failed")
-                return step(99)
-            ms.apply_all()
-            log.append(f"stage: {len(ms.scene.objects)} objects, {len(ms.assign.uv)} show {ms.asset['name'] if ms.asset else None}")
-            ms.toggle_play()
-            keys = [o.key for o in ms.scene.objects]
-            for n in range(40):
-                QTimer.singleShot(50 * n, lambda n=n: (ms.view.orbit(4, 1), ms.select(keys[: n % 3 * 2])))
-            QTimer.singleShot(2200, lambda: step(5))
-        elif i == 5:
-            log.append(f"playing while selecting: {not ms.view.paused}, frame {ms.view.frame}")
-            ms.toggle_play()
-            ms.playhead.scrub(100)
-            QTimer.singleShot(800, lambda: step(6))
-        elif i == 6:
-            f = ms.playhead.frame
-            ms.playhead.step(1)
-            QTimer.singleShot(600, lambda: (log.append(f"scrub 100, step: {f} -> {ms.playhead.frame}"), grab("2-mapped"), step(7)))
-        elif i == 7:
-            f = ms.playhead.frame
-            win.show_view("review")
-            QTimer.singleShot(1500, lambda: (log.append(f"QC frame {win.review.frame} (Mapping {f})"), win.show_view("mapping"),
-                                             QTimer.singleShot(1500, lambda: step(8))))
-        elif i == 8:
-            f = ms.playhead.frame
-            win.show_view("review")
-            QTimer.singleShot(1500, lambda: (log.append(f"Mapping again at {f}, QC again at {win.review.frame}"), step(99)))
-        else:
-            grab("3-review")
-            log.append(f"player errors: {len(errors)}{' ' + repr(errors[:2]) if errors else ''}")
-            print("mapping check: " + " | ".join(log), flush=True)
-            app.quit()
+    def wait_import(then, limit=600):
+        if ms().importer.busy and limit > 0:
+            return QTimer.singleShot(100, lambda: wait_import(then, limit - 1))
+        then()
 
-    QTimer.singleShot(1500, step)
+    clips = [r["id"] for r in service.list_assets(win.session.project) if r["kind"] in ("video", "sequence", "image")]
+    steps = []
+
+    def add(fn, wait=800):
+        steps.append((fn, wait))
+
+    def s_open():
+        win.nav["mapping"].click()
+        ms().view.error.connect(errors.append)
+    add(s_open, 1500)
+    add(lambda: (win.grab().save(f"{base}-1-mapping.png"), check("Mapping from the sidebar, clip handed over",
+                 win.current_view == "mapping" and ms().view.loaded, ms().asset["name"] if ms().asset else "no clip")), 10)
+    add(lambda: space(ms().media_box), 800)
+    add(lambda: check("Space on the closed clip selector plays", not ms().view.paused and not ms().media_box.view().isVisible()), 10)
+    add(lambda: space(ms().media_box), 500)
+    add(lambda: check("Space again pauses", ms().view.paused), 10)
+    slow = os.environ.get("NITPIX_SCREENSHOT_SLOW") or stage      # a model big enough to cancel mid-import
+    add(lambda: (ms().import_scene(slow), QTimer.singleShot(300, ms().cancel_import)), 1000)
+    add(lambda: check("Import cancelled: no stage, Import offered again", ms().scene is None and ms().import_btn.isEnabled()
+                      and not ms().importer.busy, ms().empty_lab.text().splitlines()[0]), 10)
+    add(lambda: ms().import_scene(stage), 300)
+    add(lambda: wait_import(lambda: check("Import restarted", ms().scene is not None,
+                                          f"{len(ms().scene.objects) if ms().scene else 0} objects")), 1500)
+    bad = os.environ.get("NITPIX_SCREENSHOT_BAD")
+    if bad:
+        add(lambda: (ms().import_scene(bad)), 300)
+        add(lambda: wait_import(lambda: check("Damaged model refused, stage kept", ms().scene is not None and ms().objects.currentIndex() == 1,
+                                              win.toast_lab.text())), 1000)
+    add(lambda: (ms().filter.setText("scre"), ms().select_shown()), 300)
+    add(lambda: (ms().apply_selected(), check("Filter, Select shown, Apply", len(ms().assign.uv) == 3, ms().sel_lab.text())), 300)
+    add(lambda: (ms().filter.clear(), ms().select(["Stage/Screens/Left"]), ms().clear_selected(),
+                 check("Clear one", sorted(ms().assign.uv) == ["Stage/Screens/Centre", "Stage/Screens/Right"])), 300)
+
+    def s_uv():
+        ms().select(["Stage/Screens/Centre"])
+        i = ms().uv_box.findData(1)
+        ms().uv_box.setCurrentIndex(i)
+        ms().uv_box.activated.emit(i)
+        check("UV set 2 on Centre", ms().assign.uv.get("Stage/Screens/Centre") == 1)
+    add(s_uv, 300)
+    add(lambda: space(ms().uv_box), 300)
+
+    def s_move():
+        for n in range(60):
+            QTimer.singleShot(25 * n, lambda n=n: (ms().view.orbit(4, 1) if n % 3 == 0 else ms().view.pan(3, 1) if n % 3 == 1
+                                                   else ms().view.zoom(0.2 if n < 30 else -0.2),
+                                                   ms().select(["Stage/Floor"] if n % 2 else [])))
+    add(s_move, 2000)
+    add(lambda: check("Plays through orbit/pan/zoom and selection (Space on UV selector)", not ms().view.paused, f"frame {ms().view.frame}"), 10)
+    add(lambda: (ms().toggle_play() if not ms().view.paused else None, ms().playhead.scrub(100)), 800)
+    add(lambda: ms().playhead.step(1), 600)
+    add(lambda: (win.grab().save(f"{base}-2-mapped.png"), check("Paused, scrub to 100, step", ms().playhead.frame == ms().view.frame == 101,
+                 f"frame {ms().playhead.frame}")), 10)
+
+    def s_clip():
+        other = next((c for c in clips if c != ms().asset["id"]), None)
+        i = ms().media_box.findData(other)
+        ms().media_box.setCurrentIndex(i)
+        ms().media_box.activated.emit(i)
+    add(lambda: ms().toggle_play(), 600)
+    add(s_clip, 2500)
+    add(lambda: check("Clip changed while playing", ms().view.loaded and ms().asset["id"] != clips[0] and len(ms().assign.uv) == 2,
+                      f"{ms().asset['name']}, paused {ms().view.paused}, frame {ms().view.frame}"), 10)
+    add(lambda: (ms().toggle_play() if not ms().view.paused else None), 500)
+    add(lambda: (setattr(win, "_f", ms().playhead.frame), win.show_view("review")), 1500)
+    add(lambda: check("To QC at the same clip and frame", win.review.asset["id"] == ms().asset["id"] and win.review.frame == win._f,
+                      f"QC {win.review.frame}, Mapping {win._f}"), 10)
+    add(lambda: (win.review.playhead.seek(42) if hasattr(win.review, "playhead") else None), 800)
+    add(lambda: win.show_view("mapping"), 1500)
+    add(lambda: check("Back to Mapping at QC's frame, stage kept", ms().playhead.frame == 42 and ms().scene is not None,
+                      f"frame {ms().playhead.frame}"), 10)
+
+    def s_reopen():
+        win._proj = win.session.project.folder
+        win.close_project()
+    add(s_reopen, 800)
+    add(lambda: check("Close project: Mapping reset, nothing loaded", ms().scene is None and not loaded_players()), 10)
+    add(lambda: (win.open_project(str(win._proj)), win.show_view("mapping")) if win._proj else None, 2000)
+    add(lambda: check("Reopen project: Mapping has no stage (session only) and a clip", ms().scene is None and ms().view.loaded), 10)
+    add(lambda: (ms().import_scene(stage)), 300)
+    add(lambda: wait_import(lambda: (ms().apply_all(), ms().toggle_play())), 1500)
+
+    def s_quit():
+        check("Playing before quit", not ms().view.paused)
+        t = _time.monotonic()
+        win.grab().save(f"{base}-3-end.png")
+        hb.stop()
+        win.close()
+        results.append(("PASS" if _time.monotonic() - t < 3 else "FAIL", "Window closed while playing", f"{_time.monotonic() - t:.2f} s"))
+        results.append(("PASS" if not errors else "FAIL", "No player errors", repr(errors[:3])))
+        print("\n".join(f"mapping journey: {r} | {n} | {d}" for r, n, d in results), flush=True)
+        app.quit()
+    add(s_quit, 0)
+
+    def run(i=0):
+        fn, wait = steps[i]
+        try:
+            fn()
+        except Exception as e:  # a broken step is a failed step, not a hung check
+            results.append(("FAIL", f"step {i}", f"{type(e).__name__}: {e}"))
+        if i + 1 < len(steps):
+            QTimer.singleShot(wait, lambda: run(i + 1))
+    QTimer.singleShot(1500, run)
 
 
 def _stress(app, win, count: int):
