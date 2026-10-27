@@ -24,10 +24,11 @@ def main():
     ap.add_argument("--selfcheck", nargs="?", const=True, metavar="MEDIA",
                     help="Report the tools this installation found (JSON) and exit; with a media file, try to decode it")
     ap.add_argument("--scene-import", nargs=2, metavar=("SCENE", "OUT"), help=argparse.SUPPRESS)  # the Mapping importer's helper process
+    ap.add_argument("--keep-in", metavar="PROJECT", help=argparse.SUPPRESS)                       # ...keeping a copy in this project
     a = ap.parse_args()
     if a.scene_import:
         from nitpix.sceneimport import run_helper
-        sys.exit(run_helper(*a.scene_import))
+        sys.exit(run_helper(*a.scene_import, a.keep_in))
     if a.selfcheck:
         import json
         from nitpix.selfcheck import run as selfcheck

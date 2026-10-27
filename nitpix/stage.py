@@ -47,8 +47,14 @@ class Source:
         return self.scene.source["path"]
 
     @property
+    def origin(self) -> str:
+        """Where the file came from (for showing and telling files apart); `path` is what was read,
+        which for a model kept in the project is its copy there."""
+        return self.scene.source.get("origin") or self.path
+
+    @property
     def name(self) -> str:
-        return os.path.basename(self.path)
+        return os.path.basename(self.origin)
 
 
 class Stage:
@@ -87,22 +93,29 @@ class Stage:
     def has_path(self, path: str) -> Source | None:
         """The source already read from this file (the same file by any spelling of its path)."""
         real = os.path.realpath(path)
-        return next((s for s in self.sources if os.path.realpath(s.path) == real), None)
+        return next((s for s in self.sources if os.path.realpath(s.origin) == real), None)
 
     def label(self, src: Source) -> str:
         """The file name, with as many parent folders as it takes to tell apart sources with the
         same name: "centre.obj", or "venue A/screen.obj" and "venue B/screen.obj"."""
-        parts = _parts(src.path)
-        others = [_parts(s.path) for s in self.sources if s is not src]
+        parts = _parts(src.origin)
+        others = [_parts(s.origin) for s in self.sources if s is not src]
         n = 1
         while n < len(parts) and any(o[-n:] == parts[-n:] for o in others):
             n += 1
         return "/".join(parts[-n:])
 
     # ---- changes ------------------------------------------------------------------------
-    def add(self, scene: NormalizedScene) -> Source:
-        sid = f"m{self.next_id}"
-        self.next_id += 1
+    def add(self, scene: NormalizedScene, sid: str | None = None) -> Source:
+        """A new source; `sid` restores a saved one (later new ids continue after it)."""
+        if sid is None:
+            sid = f"m{self.next_id}"
+            self.next_id += 1
+        else:
+            if self.source(sid) is not None:
+                raise ValueError(f"source {sid} is already on the stage")
+            if sid[1:].isdigit():
+                self.next_id = max(self.next_id, int(sid[1:]) + 1)
         objs = tuple(dataclasses.replace(o, key=stage_key(sid, o.key), geometries=tuple(stage_key(sid, g) for g in o.geometries))
                      for o in scene.objects)
         src = Source(sid, scene, objs)
