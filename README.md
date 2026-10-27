@@ -101,6 +101,17 @@ Rules and current limits:
 - **Scenes containing lines or points** (splines, guides) are refused with an explanation. Export surfaces only.
 - **Out of scope:** UV offset/scale, separate media per object, animation, lighting/PBR, projection or calibration, and output.
 
+What works and what does not, as tested (generated fixtures, plus a survey of 372 show-file OBJ/FBX models on one Mac in October 2026):
+
+| | |
+|---|---|
+| **Works** | OBJ and FBX (binary, Blender and common DCC exports), metres or centimetres, Y or Z up; objects in a hierarchy, instances, duplicate names, mirrored objects; several UV sets per object. Stages up to a few thousand objects stay interactive (5,000 objects, 1M triangles: about 30 frames/s on an M2 Max) |
+| **Works, with a note** | OBJ files that also contain lines or points (SketchUp edges, Blender loose edges): the lines are ignored and the import says how many. UVs outside 0–1: those parts are neutral grey, and assigned objects say how much |
+| **Imports, but shows little or no media** | Objects without UVs (about one model in six in the survey); UVs made for a repeating material or world-scaled rather than laid out for the media (about one in eight was mostly outside the image). The model needs a UV set for the media |
+| **Refused, with a reason** | FBX containing lines or points; files of lines or points only; damaged or empty files; FBX the importer cannot read (it names the FBX version) |
+| **Slow** | Stages of tens of thousands of objects: each object is drawn separately, so 20,000 objects run at about 8 frames/s and a 135,000-object venue model at about 1 frame/s (it also needed 14 GB). Export the screens you need, or join meshes that share a surface |
+| **Not supported** | Several model files as one stage (one import replaces the stage); assigning per material slot; UV offset, scale, repeat or fitting; saving the stage and assignments with the project; other formats (glTF, USD, 3DS, Alembic) |
+
 `tests/fixtures/scenes/` has small generated stages to try it with (`stage.fbx`, `stage_cm_zup.fbx`, `stage.obj`). They include three screens, a floor, a truss without UVs, instances, duplicate names, a mirrored panel and UVs that run past 0–1. `uvedge.fbx` has UVs at and past the image's edge, tiled UVs and an object with two different UV sets.
 
 ### Renamed from LHS-QC Review
@@ -111,21 +122,11 @@ The desktop app is `nitpix/ui/`: a PySide6 window whose review screen renders th
 
 The sidebar shows icons with labels and collapses to an icon strip (the chevron at its top; remembered between runs). Keyboard: Space and the arrow keys drive the player from anywhere on the review screen (a just-clicked button, the tabs, the metadata tree); only text fields keep them, and the go-to field hands them back while it is empty. Space on a finished clip plays it again from the start. Dragging on the timeline shows exact frames as fast as the decoder delivers them; while the picture is catching up with the pointer, the timecode is dimmed and already shows the frame you are going to (notes, bookmarks and in/out points use that frame). Dragging during playback keeps playing. New projects default to the built-in show-content spec: NotchLC 1080p25 in MOV, Rec.709 / gamma 2.4, alpha required (it exposes IMAG), stereo 48 kHz PCM, PNG stills with alpha at 1920×1080. ‹ Markers › (or [ and ]) jumps between findings and notes on the timeline. Start timecode is reported but only checked when a spec asks for it ("Timecode track: Required", or a specific start timecode). Profiles only apply to codecs that have them, so a ProRes 4444 profile in a spec does not fail NotchLC; NotchLC's colour tags are reported as information, since the decoder's RGB/sRGB tags are fixed defaults rather than metadata. Image sequences come in through Add media: choose the folder that holds the frames, or any one frame of it ("Choose image sequence…"); frames named `name.####.ext` become one asset. The window sizes itself to the screen and remembers its last position; long names and paths elide and the transport controls wrap, so the layout holds down to about 1040 × 640. Specs are edited natively (pickers for codecs, colour, rates and limits; typed values are matched through the vocabulary). Still to come: the Windows build.
 
-## Setup (macOS)
+## First run
 
-1. **Python 3.9+.** macOS ships `python3` with the Xcode command-line tools: `xcode-select --install`.
-2. **FFmpeg** (required, provides `ffprobe` and `ffmpeg`): `brew install ffmpeg`
-3. **IINA** (recommended): <https://iina.io> or `brew install --cask iina`. Launch it once after installing.
-4. **PDF export** needs ReportLab: `python3 -m pip install --user -r requirements.txt`
-5. **Run the app**, by either:
-   ```bash
-   python3 -m nitpix                       # opens http://127.0.0.1:8765 in your browser
-   python3 -m nitpix ~/QC/ClientX.nitpix    # open or create a project directly
-   ```
-   or double-clicking **`nitpix.command`**.
-6. **Load the demo.** On the start screen, click **Load demo delivery**. It generates about 400 MB of test media with planted faults (around 2 minutes) and scans it.
-
-The server listens on `127.0.0.1` only. Stop it with Ctrl+C in the terminal.
+1. **Install** with the command under *Install (macOS)*, or run from source (*Running*).
+2. **IINA** (optional, for "Open in IINA"): <https://iina.io> or `brew install --cask iina`. Launch it once after installing.
+3. **Load the demo.** On the start screen, click **Load demo delivery**. It generates about 400 MB of test media with planted faults (around 2 minutes) and scans it.
 
 ## How the app talks to IINA
 
@@ -213,7 +214,7 @@ ClientX.nitpix/
   exports/     CSV / JSON / PDF reports
 ```
 
-Reopen a project from the start screen, or with `python3 -m nitpix path/to/project.nitpix`.
+Reopen a project from the start screen, by opening the `.nitpix` folder with nitpix, or from source with `.venv/bin/nitpix path/to/project.nitpix`.
 
 ## Known limitations
 
@@ -231,15 +232,16 @@ Reopen a project from the start screen, or with `python3 -m nitpix path/to/proje
 - **Drop-frame timecode** is supported for 29.97 and 59.94. 23.976 uses 24-frame counting, as is standard.
 - **Format support** is whatever your FFmpeg build decodes. ProRes RAW, BRAW and R3D are not supported.
 - **One reviewer per project at a time.** A project on a shared drive is fine, but not edited simultaneously.
-- **The interface runs in your browser** at `127.0.0.1`. It is not yet wrapped as a native app.
+- **The browser UI** (`nitpix --web`, served on `127.0.0.1` only) is the original interface and is no longer developed; the desktop app is the supported one. The browser player's proxies (see below) belong to it.
 
 ## Developing
 
 ```bash
-python3 -m unittest discover tests          # full suite, about 30 s; frame-viewer tests need ffmpeg
-NITPIX_LIVE_IINA=1 python3 -m unittest tests.test_iina_live -v   # real IINA on a Mac (opens windows)
-python3 tools/make_demo.py /tmp/demo        # regenerate demo media
-NITPIX_ALLOW_NON_MAC=1 python3 -m nitpix     # test the IINA bridge on Linux with tools/dev/fake-iina-cli + mpv
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover tests   # full suite, about 5 min; needs ffmpeg
+NITPIX_LIVE_PLAYER=1 .venv/bin/python -m unittest tests.test_scrub_live tests.test_mapping_live   # real libmpv in windows
+NITPIX_LIVE_IINA=1 .venv/bin/python -m unittest tests.test_iina_live -v   # real IINA on a Mac (opens windows)
+.venv/bin/python tools/make_demo.py /tmp/demo        # regenerate demo media
+NITPIX_ALLOW_NON_MAC=1 .venv/bin/nitpix --web        # the IINA bridge on Linux with tools/dev/fake-iina-cli + mpv
 ```
 
 Code map:
@@ -276,6 +278,23 @@ Tests:
 - `tests/test_vocab.py`, `test_checks.py`, `test_store.py`, `test_server.py` and `test_web.py` cover preset matching, rules, settings, the API (including a real scan end to end) and the UI/vocabulary contract.
 
 Fonts are Inter (the desktop app), Inter Tight (PDF reports and the legacy web UI) and IBM Plex Mono, all under the SIL Open Font License; the licences are in `nitpix/web/fonts`.
+
+## Release checks
+
+Before a release, on the Mac that builds it. None of this touches your installed nitpix, its preferences or your projects.
+
+1. Tests: the full suite and the live player tests (*Developing*). Test runs keep their preferences in temporary INI files and their recent list in a temporary folder.
+2. Build somewhere new: `NITPIX_DIST=/tmp/rc tools/build_mac.sh`. The script verifies the variant with a clean-environment `--selfcheck` (decoder, scene importer). Then `codesign -v --deep /tmp/rc/nitpix.app` and `hdiutil verify /tmp/rc/nitpix-<version>.dmg`.
+3. The packaged app, with throwaway preferences and state and a throwaway project holding two video clips:
+   ```bash
+   NITPIX_PREFS_DIR=/tmp/rc/prefs NITPIX_STATE_DIR=/tmp/rc/state \
+   NITPIX_SCREENSHOT=/tmp/rc/shot.png NITPIX_SCREENSHOT_STAGE=tests/fixtures/scenes/stage.fbx \
+   NITPIX_SCREENSHOT_SLOW=<a large OBJ> NITPIX_SCREENSHOT_BAD=<a damaged FBX> \
+   /tmp/rc/nitpix.app/Contents/MacOS/nitpix /tmp/rc/check.nitpix
+   ```
+   It walks Mapping (sidebar, Space on the clip selector, import / cancel / restart, damaged file, filter and apply, clear, UV set, camera while playing, scrub and step, clip change, QC and back, close and reopen the project, quit while playing) and prints PASS / FAIL per step, with player errors and event-loop stalls. Pass the project as the only argument: macOS opens command-line paths as documents.
+4. By hand, on a real keyboard and mouse: Space with the clip list focused after choosing a clip; orbit, pan (right-drag and ⇧-drag) and pinch/scroll zoom on a trackpad; audio follows the screen you are on.
+5. Publish (`gh release create vX.Y.Z dist/nitpix-X.Y.Z.dmg`), then check that the in-app update check offers it and that `install.sh` with `NITPIX_INSTALL_DIR=<scratch> NITPIX_NO_OPEN=1` installs it.
 
 ## Licence
 
