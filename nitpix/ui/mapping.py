@@ -1,11 +1,11 @@
-"""The Mapping workspace (experimental): a project's media on an imported OBJ / FBX stage.
+"""The Mapping workspace: a project's media on an imported OBJ / FBX stage.
 
 Separate from the QC review screen, with its own player (nitpix/ui/mapview.py), scene and
 assignments, sharing the transport behaviour through the Playhead. One playback session at a
 time: MainWindow calls activate() / deactivate() as the user moves between the workspaces, and a
 deactivated workspace has no file loaded, so it cannot play, decode, make sound or seek.
 
-Session only in this alpha: the imported stage, the assignments and the camera last while the
+Session only for now: the imported stage, the assignments and the camera last while the
 app runs and are not saved with the project.
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ from .widgets import ElideLabel, repolish
 
 KEY = Qt.ItemDataRole.UserRole
 MEDIA_KINDS = ("video", "sequence", "image")
-SESSION_NOTE = "Experimental · session only: the imported stage and its assignments are not saved with the project."
+SESSION_NOTE = "Session only: the imported stage, its assignments and the camera are not saved with the project."
 CAMERA_HINT = "Drag to orbit · ⇧-drag or right-drag to pan · scroll to zoom · F frames the stage"
 
 
@@ -84,7 +84,7 @@ class MappingScreen(QWidget):
         self.cancel_btn = btn("Cancel import", "", self.cancel_import)
         self.cancel_btn.hide()
         head.addWidget(self.cancel_btn)
-        note = QLabel("Experimental · session only")
+        note = QLabel("Session only: not saved")
         note.setProperty("faint", True)
         note.setToolTip(SESSION_NOTE)
         head.addWidget(note)

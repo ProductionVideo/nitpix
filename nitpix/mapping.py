@@ -1,8 +1,8 @@
 """Which objects of an imported stage show the current media, and through which of their own UV
 sets. One shared source for all of them. Pure data, no Qt: the Mapping screen edits it and the
-view draws from it. Session only in this alpha: nothing here is saved with the project.
+view draws from it. Session only for now: nothing here is saved with the project.
 
-Rules (agreed for the alpha):
+Rules:
 - Assignment is per object, with all of its material slots; there are no slot-level overrides.
 - An object needs a UV set present on every slot to be assigned one; objects without UVs stay
   neutral and are never given generated coordinates.

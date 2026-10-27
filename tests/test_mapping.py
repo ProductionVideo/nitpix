@@ -309,7 +309,7 @@ class Workspace(unittest.TestCase):
 
 @unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
 class OneSession(unittest.TestCase):
-    """MainWindow with Mapping enabled: one player has a file at a time; switching keeps frames."""
+    """MainWindow (release build unless stated): Mapping in the sidebar; one player has a file at a time; switching keeps frames."""
 
     @classmethod
     def setUpClass(cls):
@@ -320,7 +320,7 @@ class OneSession(unittest.TestCase):
         cls.app.setStyleSheet(theme.STYLESHEET)
         cls.tmp = tempfile.mkdtemp(prefix="nitpix mapping session ")
 
-    def window(self, experimental=True):
+    def window(self, experimental=False, legacy=None):
         from nitpix.ui.app import MainWindow
         if experimental:
             for name, value in (("IS_EXPERIMENTAL", True), ("VARIANT", "exp"), ("SETTINGS", ("nitpix-exp", "nitpix-exp"))):
@@ -328,7 +328,9 @@ class OneSession(unittest.TestCase):
                 p.start()
                 self.addCleanup(p.stop)
         from nitpix.ui.prefs import prefs
-        prefs().clear()                                                      # each test starts with Mapping off
+        prefs().clear()                                                      # fresh preferences...
+        if legacy is not None:
+            prefs().setValue("mapping/enabled", legacy)                      # ...or ones from when Mapping was a setting
         w = MainWindow(service.Session())
         self.addCleanup(lambda: (w.close(), w.deleteLater()))
         d = tempfile.mkdtemp(dir=self.tmp)
@@ -350,29 +352,62 @@ class OneSession(unittest.TestCase):
         player.target, player.loaded = path, True
         player.m.path = path
 
-    def test_release_build_has_no_mapping(self):
-        w = self.window(experimental=False)
-        self.assertNotIn("mapping", w.nav)
-        self.assertIsNone(w.mapping)
-        self.assertIsNone(w.settings_screen.mapping_box)
-        w.show_view("mapping")
-        self.assertEqual(w.current_view, "dashboard")
+    def nav_order(self, w):
+        lay = w.nav["review"].parentWidget().layout()
+        pos = {lay.indexOf(b): k for k, b in w.nav.items()}
+        return [pos[i] for i in sorted(pos)]
 
-    def test_off_by_default_then_enabled_from_settings(self):
-        w = self.window()
-        self.assertFalse(w.nav["mapping"].isVisibleTo(w))
-        self.assertIsNone(w.mapping)
-        w.settings_screen.refresh()
-        self.assertFalse(w.settings_screen.mapping_box.isChecked())
-        w.settings_screen.mapping_box.setChecked(True)
-        self.assertTrue(w.nav["mapping"].isVisibleTo(w))
-        self.assertIsNotNone(w.mapping)
+    def test_release_build_shows_mapping_beside_review(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
         from nitpix.ui.app import VIEWS
-        self.assertNotIn("mapping", VIEWS)                                   # 1-6 keep their screens
+        from nitpix.ui.shortcuts import SECTIONS
+        w = self.window()
+        w.show()
+        pump(self.app, timeout=0.05)
+        self.assertFalse(variant.IS_EXPERIMENTAL)
+        self.assertEqual(self.nav_order(w), ["dashboard", "media", "review", "mapping", "presets", "reports", "settings"])
+        self.assertTrue(all(b.isVisible() for b in w.nav.values()))
+        self.assertIsNone(w.mapping)                                         # nothing made until it is opened
+        w.nav["mapping"].click()
+        self.assertEqual(w.current_view, "mapping")
+        self.assertTrue(w.nav["mapping"].isChecked())
+        self.assertIsNotNone(w.mapping)
+        self.assertEqual(VIEWS, ["dashboard", "media", "review", "presets", "reports", "settings"])   # number keys unchanged
+        self.assertEqual(w.nav["presets"].toolTip(), "Specs (4)")
+        self.assertNotRegex(w.nav["mapping"].toolTip(), r"\(\d\)")
+        self.assertEqual(SECTIONS["mapping"][0], "Mapping")
+        w.dashboard.setFocus()
+        QTest.keyClick(w.dashboard, Qt.Key.Key_4)
+        self.assertEqual(w.current_view, "presets")
+        w.set_rail_collapsed(True)                                           # icon strip: same order, icon only
+        self.assertEqual((w.nav["mapping"].text(), w.nav["mapping"].icon().isNull()), ("", False))
+        w.set_rail_collapsed(False)
+        self.assertEqual(w.nav["mapping"].text(), "Mapping")
+        self.assertFalse(hasattr(w.settings_screen, "mapping_box"))          # no setting to find first
+
+    def test_an_old_mapping_off_preference_hides_nothing(self):
+        w = self.window(legacy=False)
+        self.assertTrue(w.nav["mapping"].isVisibleTo(w))
+        w.show_view("mapping")
+        self.assertEqual(w.current_view, "mapping")
+
+    def test_without_a_project_mapping_leads_to_the_start(self):
+        w = self.window()
+        w.close_project()
+        w.show_view("mapping")
+        self.assertEqual(w.current_view, "start")
+        self.assertIsNone(w.mapping)
+
+    def test_experimental_builds_have_it_too(self):
+        w = self.window(experimental=True)
+        self.assertEqual(self.nav_order(w)[3], "mapping")
+        w.show_view("mapping")
+        self.assertEqual(w.current_view, "mapping")
 
     def test_switching_hands_over_one_session_and_keeps_the_frame(self):
         w = self.window()
-        w.set_mapping_enabled(True)
+        w.ensure_mapping()
         rv, ms = w.review, w.mapping
         ms.view.m = FakeMpv()                                                # the libmpv stand-in for Mapping's player too
         w.show_asset(self.a)
@@ -400,7 +435,7 @@ class OneSession(unittest.TestCase):
 
     def test_changing_the_mapped_clip_and_leaving_via_another_screen(self):
         w = self.window()
-        w.set_mapping_enabled(True)
+        w.ensure_mapping()
         w.show_asset(self.a)
         w.show_view("mapping")
         ms = w.mapping
@@ -415,7 +450,7 @@ class OneSession(unittest.TestCase):
         from PySide6.QtCore import Qt
         from PySide6.QtTest import QTest
         w = self.window()
-        w.set_mapping_enabled(True)
+        w.ensure_mapping()
         w.show_asset(self.a)
         w.show_view("mapping")
         ms = w.mapping
@@ -438,7 +473,7 @@ class OneSession(unittest.TestCase):
 
     def test_close_project_resets_mapping(self):
         w = self.window()
-        w.set_mapping_enabled(True)
+        w.ensure_mapping()
         w.show_view("mapping")
         w.mapping._set_scene(load_scene(os.path.join(FIX, "stage.obj")), "stage.obj")
         w.close_project()

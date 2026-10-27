@@ -30,7 +30,8 @@ from .shortcuts import ShortcutsDialog
 from .review import ReviewScreen, btn, chip
 from .widgets import ElideLabel, nav_icon, tidy_combo
 
-VIEWS = ["dashboard", "media", "review", "presets", "reports", "settings"]
+VIEWS = ["dashboard", "media", "review", "presets", "reports", "settings"]   # number keys 1-6, as before Mapping
+NAV = ["dashboard", "media", "review", "mapping", "presets", "reports", "settings"]   # the sidebar, top to bottom
 VIEW_LABEL = {"dashboard": "Dashboard", "media": "Media", "review": "Review", "presets": "Specs", "reports": "Reports",
               "settings": "Settings", "mapping": "Mapping"}
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -447,13 +448,6 @@ class SettingsScreen(QWidget):
         self.auto_updates = QCheckBox("Check for updates when nitpix starts (at most once a day)")
         self.auto_updates.toggled.connect(lambda on: prefs().setValue("updates/auto", on))
         form.addRow("", self.auto_updates)
-        self.mapping_box = None
-        if variant.IS_EXPERIMENTAL:   # never offered in a release build
-            form.addRow(QLabel("<b>Experimental</b>"))
-            self.mapping_box = QCheckBox("Mapping workspace: project media on an imported OBJ / FBX stage")
-            self.mapping_box.setToolTip("Adds Mapping to the sidebar. Session only: stages and assignments are not saved.")
-            self.mapping_box.toggled.connect(self.win.set_mapping_enabled)
-            form.addRow("", self.mapping_box)
         if variant.IS_EXPERIMENTAL:  # updates are the release's business
             self.version_lab.setText(f"nitpix {__version__} (experimental build)")
             self.update_btn.setEnabled(False)
@@ -498,10 +492,6 @@ class SettingsScreen(QWidget):
         self.auto_updates.blockSignals(True)
         self.auto_updates.setChecked(not variant.IS_EXPERIMENTAL and prefs().value("updates/auto", True, type=bool))
         self.auto_updates.blockSignals(False)
-        if self.mapping_box is not None:
-            self.mapping_box.blockSignals(True)
-            self.mapping_box.setChecked(self.win.mapping_enabled())
-            self.mapping_box.blockSignals(False)
 
     def save(self):
         p = self.win.session.project
@@ -570,27 +560,17 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.proj_lab)
         self.nav = {}
         ink, ink_on = theme.T["ink2"], theme.T["accent_ink"]
-        for i, v in enumerate(VIEWS, 1):
+        for v in NAV:
             b = QPushButton(VIEW_LABEL[v])
             b.setIcon(nav_icon(v, ink, ink_on))
             b.setIconSize(QSize(18, 18))
             b.setProperty("nav", True)
             b.setCheckable(True)
-            b.setToolTip(f"{VIEW_LABEL[v]} ({i})")
+            b.setToolTip(f"{VIEW_LABEL[v]} ({VIEWS.index(v) + 1})" if v in VIEWS else    # Mapping has no number key
+                         "Mapping: the project's media on an imported stage")
             b.clicked.connect(lambda _, v=v: self.show_view(v))
             rl.addWidget(b)
             self.nav[v] = b
-        if variant.IS_EXPERIMENTAL:   # not a numbered view: 1-6 keep their meaning
-            b = QPushButton(VIEW_LABEL["mapping"])
-            b.setIcon(nav_icon("mapping", ink, ink_on))
-            b.setIconSize(QSize(18, 18))
-            b.setProperty("nav", True)
-            b.setCheckable(True)
-            b.setToolTip("Mapping (experimental): media on an imported stage")
-            b.clicked.connect(lambda _: self.show_view("mapping"))
-            b.setVisible(False)
-            rl.addWidget(b)
-            self.nav["mapping"] = b
         rl.addStretch(1)
         self.tools_lab = QLabel()
         self.tools_lab.setProperty("faint", True)
@@ -618,7 +598,7 @@ class MainWindow(QMainWindow):
         centre.setContentsMargins(0, 0, 0, 0)
         centre.setSpacing(0)
         self.stack = QStackedWidget()
-        self.mapping = None          # the Mapping workspace, made when first enabled (experimental builds only)
+        self.mapping = None          # the Mapping workspace, made when first opened
         self.start = StartScreen(self)
         self.dashboard = DashboardScreen(self)
         self.media = MediaScreen()
@@ -630,7 +610,6 @@ class MainWindow(QMainWindow):
                         "presets": self.presets, "reports": self.reports_screen, "settings": self.settings_screen}
         for s in self.screens.values():
             self.stack.addWidget(s)
-        self._apply_mapping_enabled()
         centre.addWidget(self.stack, 1)
         self.jobbar = JobBar(self)
         centre.addWidget(self.jobbar)
@@ -769,29 +748,16 @@ class MainWindow(QMainWindow):
         self.show_view("start")
         self.refresh_rail()
 
-    # ---- Mapping (experimental builds) --------------------------------------------------------
-    def mapping_enabled(self) -> bool:
-        return variant.IS_EXPERIMENTAL and prefs().value("mapping/enabled", False, type=bool)
-
-    def set_mapping_enabled(self, on: bool):
-        if not variant.IS_EXPERIMENTAL:
-            return
-        prefs().setValue("mapping/enabled", bool(on))
-        self._apply_mapping_enabled()
-        self.toast("Mapping is in the sidebar" if on else "Mapping hidden")
-
-    def _apply_mapping_enabled(self):
-        on = self.mapping_enabled()
-        if on and self.mapping is None:
+    # ---- Mapping ------------------------------------------------------------------------------
+    def ensure_mapping(self):
+        """The Mapping workspace, made on first use: no player or GL resources until then."""
+        if self.mapping is None:
             from .mapping import MappingScreen
             self.mapping = MappingScreen(self.session)
             self.mapping.status.connect(self.toast)
             self.screens["mapping"] = self.mapping
             self.stack.addWidget(self.mapping)
-        if "mapping" in self.nav:
-            self.nav["mapping"].setVisible(on)
-        if not on and getattr(self, "current_view", None) == "mapping":
-            self.show_view("dashboard")
+        return self.mapping
 
     def _reset_mapping(self):
         if self.mapping is not None:
@@ -803,8 +769,8 @@ class MainWindow(QMainWindow):
     def show_view(self, v: str):
         if v != "start" and not self.session.project:
             v = "start"
-        if v == "mapping" and self.mapping is None:
-            v = "dashboard"
+        if v == "mapping":
+            self.ensure_mapping()
         if getattr(self, "current_view", None) == "mapping" and v != "mapping":
             self._handoff = self.mapping.deactivate()      # one playback session: Mapping lets go first
         if v == "review" and self.review.released:

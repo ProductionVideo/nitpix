@@ -75,9 +75,9 @@ What an experimental build keeps separate:
 
 **It does not separate projects.** Opening a project in an experimental build edits that project's data (notes, review status, settings, scans), exactly as the release would. The same applies to the demo project in `~/nitpix Projects/demo`. Try experimental builds on a throwaway project, or a copy of one.
 
-### Mapping (experimental alpha)
+### Mapping
 
-Mapping shows a project's media on an imported stage model while it plays, so you can check how content lands on screens. It exists only in experimental builds, and is off until you turn it on under Settings ▸ Experimental ▸ Mapping workspace. It then appears in the sidebar.
+Mapping shows a project's media on an imported stage model while it plays, so you can check how content lands on screens. Open a project and choose **Mapping** in the sidebar, between Review and Specs. It has no number key: 1–6 still go to Dashboard, Media, Review, Specs, Reports and Settings.
 
 To use it:
 
@@ -88,7 +88,7 @@ To use it:
 5. Pick which of the objects' own UV sets to use. For objects already showing the clip the change applies at once. If the chosen set runs outside the image, the panel says how much of the surface is, or would be, neutral; its tooltip has the exact ranges.
 6. Use the usual transport keys (Space, ← →, ⇧← ⇧→, Home, End) and the timeline. Drag to orbit, right-drag or ⇧-drag to pan, scroll to zoom: the hint under the view goes once you have used it. **F** (Frame all) fits the whole stage in view; **Reset view** also returns to the front.
 
-Rules for this alpha:
+Rules and current limits:
 
 - **Assignment is per object,** including all of its material slots. A stage exported as one object with screens as material slots must be split into objects before export.
 - **Outside UV 0–1 is always neutral grey.** UVs are used as authored: they are never normalised, rescaled or wrapped. Only export noise within 0.0001 of the edge counts as on the image, which is under half a texel of the largest preview, so it never leaves a grey fringe. Objects without UVs stay grey and are never given generated coordinates.
@@ -97,7 +97,7 @@ Rules for this alpha:
 - **Preview resolution:** media over 3840 px on the long side is downscaled for this spatial preview; QC still plays it at full size.
 - **Colours are display-referred:** the same picture as the QC player, but unlit and shown as an 8-bit preview. This is not an LED processor simulation.
 - **One playback session at a time:** moving between QC and Mapping hands over the position, and only one of them plays.
-- **Session only:** the imported stage, assignments and camera last until you quit. Nothing is saved with the project.
+- **Session only:** the imported stage, assignments and camera last until you close the project or quit. Nothing is saved with the project yet.
 - **Scenes containing lines or points** (splines, guides) are refused with an explanation. Export surfaces only.
 - **Out of scope:** UV offset/scale, separate media per object, animation, lighting/PBR, projection or calibration, and output.
 

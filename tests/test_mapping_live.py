@@ -15,7 +15,6 @@ import subprocess
 import tempfile
 import time
 import unittest
-from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures", "scenes")
@@ -26,7 +25,7 @@ if LIVE:
     from PySide6.QtGui import QSurfaceFormat, QVector3D
     from PySide6.QtWidgets import QApplication
 
-    from nitpix import libmpv, service, variant
+    from nitpix import libmpv, service
     from nitpix.probe import ffprobe, find_tool, normalise, summary_fields
     from nitpix.scene import load_scene
     from nitpix.store import Project
@@ -267,7 +266,7 @@ class Drawn(unittest.TestCase):
 
 @unittest.skipUnless(LIVE, "set NITPIX_LIVE_PLAYER=1 with libmpv, ffmpeg, assimp-py and a display")
 class Switching(unittest.TestCase):
-    """The app's window, Mapping enabled: QC and Mapping hand over one session at exact frames."""
+    """The app's window (release build): QC and Mapping hand over one session at exact frames."""
 
     @classmethod
     def setUpClass(cls):
@@ -288,10 +287,6 @@ class Switching(unittest.TestCase):
 
     def test_switching_with_a_seek_pending_lands_on_the_exact_frame(self):
         from nitpix.ui.app import MainWindow
-        for name, value in (("IS_EXPERIMENTAL", True), ("VARIANT", "exp"), ("SETTINGS", ("nitpix-exp", "nitpix-exp"))):
-            p = mock.patch.object(variant, name, value)
-            p.start()
-            self.addCleanup(p.stop)
         w = MainWindow(service.Session())
         w.resize(1300, 850)
         w.show()
@@ -300,7 +295,7 @@ class Switching(unittest.TestCase):
         st = os.stat(self.clip)
         aid = p.upsert_asset(self.clip, kind="video", name="bars.mp4", size=st.st_size, mtime=st.st_mtime, scan_state="done",
                              **summary_fields(normalise(ffprobe(self.clip), self.clip)))
-        w.set_mapping_enabled(True)
+        w.ensure_mapping()
         rv, ms = w.review, w.mapping
         one_session = lambda: [x for x in (rv.player.m.path, ms.view.m.path) if x]
         w.show_asset(aid)
