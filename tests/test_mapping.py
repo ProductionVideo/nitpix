@@ -141,7 +141,8 @@ class UVWarnings(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
-class Workspace(unittest.TestCase):
+class _Screen(unittest.TestCase):
+    """A MappingScreen on a throwaway project with one clip."""
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -174,22 +175,26 @@ class Workspace(unittest.TestCase):
         self.session.project.close()
         pump(self.app, timeout=0.05)
 
-    def import_(self, name):
-        self.ms.import_scene(os.path.join(FIX, name))
-        self.assertTrue(pump(self.app, lambda: not self.ms.importer.busy and self.ms.import_btn.isEnabled(), 30))
+    def import_(self, *names, replace=False):
+        (self.ms.replace_stage if replace else self.ms.add_models)([n if os.path.isabs(n) else os.path.join(FIX, n) for n in names])
+        self.assertTrue(pump(self.app, lambda: self.ms._batch is None, 30))
         pump(self.app, timeout=0.05)
 
+
+@unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
+class Workspace(_Screen):
     def test_empty_then_importing_then_objects(self):
         ms = self.ms
         self.assertEqual(ms.objects.currentIndex(), 0)                       # what to do next, with its own button
-        self.assertIn("Import an OBJ or FBX", ms.empty_lab.text())
+        self.assertIn("Add one or more OBJ or FBX model files", ms.empty_lab.text())
+        self.assertFalse(ms.replace_btn.isEnabled())                         # nothing to replace yet
         self.assertTrue(ms.empty_import.isVisibleTo(ms))
         self.assertFalse(ms.apply_btn.isEnabled())
         self.assertFalse(ms.apply_btn.property("primary"))                   # no strong style on a button that cannot act
-        ms.import_scene(os.path.join(FIX, "stage.fbx"))
-        self.assertIn("Importing stage.fbx", ms.empty_lab.text())
+        ms.add_models([os.path.join(FIX, "stage.fbx")])
+        self.assertIn("Adding stage.fbx", ms.empty_lab.text())
         self.assertTrue(ms.cancel_btn.isVisibleTo(ms))
-        self.assertTrue(pump(self.app, lambda: not ms.importer.busy and ms.import_btn.isEnabled(), 30))
+        self.assertTrue(pump(self.app, lambda: ms._batch is None, 30))
         pump(self.app, timeout=0.05)
         self.assertEqual(ms.objects.currentIndex(), 1)
         self.assertEqual(ms.all_btn.text(), "Apply to all 12 with UVs")
@@ -202,18 +207,19 @@ class Workspace(unittest.TestCase):
     def test_a_failed_or_cancelled_reimport_keeps_the_stage_and_its_list(self):
         ms = self.ms
         self.import_("stage.fbx")
-        ms.select(["Stage/Floor"])
+        ms.select(["m1:Stage/Floor"])
         ms.apply_selected()
-        self.import_("garbage.fbx")                                          # damaged: refused
+        self.import_("garbage.fbx", replace=True)                            # damaged: refused
         self.assertEqual(ms.objects.currentIndex(), 1)                       # the stage's objects, not an error page
         self.assertTrue(ms.scene_lab.text().startswith("stage.fbx: 13 objects"), ms.scene_lab.text())
-        self.assertTrue(self.said[-1][1] and self.said[-1][0].startswith("garbage.fbx: "), self.said[-1])
-        self.assertEqual(list(ms.assign.uv), ["Stage/Floor"])
-        ms.import_scene(os.path.join(FIX, "stage.obj"))
+        self.assertTrue(self.said[-1][1] and self.said[-1][0].startswith(
+            "The stage is unchanged: none of the files could be used. garbage.fbx could not be used: "), self.said[-1])
+        self.assertEqual(list(ms.assign.uv), ["m1:Stage/Floor"])
+        ms.replace_stage([os.path.join(FIX, "stage.obj")])
         ms.cancel_import()                                                   # while it is still running
         pump(self.app, timeout=1.0)
         self.assertEqual((ms.objects.currentIndex(), ms.scene_lab.text()[:9]), (1, "stage.fbx"))
-        self.assertEqual(list(ms.assign.uv), ["Stage/Floor"])
+        self.assertEqual(list(ms.assign.uv), ["m1:Stage/Floor"])
 
     def test_a_stage_of_many_objects_lists_and_selects_quickly(self):
         """20,000 objects (real show models reach 135,000). Finding objects by key and selecting
@@ -229,24 +235,24 @@ class Workspace(unittest.TestCase):
         scene = NormalizedScene({"path": "/generated"}, "test", objs, {"mesh:0": g}, ((0, 0, 0), (1, 1, 0)))
         ms = self.ms
         t = time.monotonic()
-        ms._set_scene(scene, "many.obj")
+        ms._replace_with([scene])
         ms.select_shown()
         ms.apply_selected()
         ms.filter.setText("Panel_1999")
         ms.select_shown()
         took = time.monotonic() - t
         self.assertEqual(len(ms.assign.uv), n)
-        self.assertEqual(sorted(ms.selected_keys()), [f"Rig/Panel_1999{d}" for d in range(10)])
+        self.assertEqual(sorted(ms.selected_keys()), [f"m1:Rig/Panel_1999{d}" for d in range(10)])
         self.assertLess(took, 20)                                           # was many minutes
 
     def test_filter_keeps_selection_and_assignments(self):
         ms = self.ms
         self.import_("stage.fbx")
-        ms.select(["Stage/Floor"])
+        ms.select(["m1:Stage/Floor"])
         ms.filter.setText("scre")
         shown = sorted(it.data(0, 0x0100) for it in ms._rows() if not ms._hidden(it))
-        self.assertEqual(shown, ["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"])   # by path, too
-        self.assertEqual(ms.selected_keys(), ["Stage/Floor"])               # still selected...
+        self.assertEqual(shown, ["m1:Stage/Screens/Centre", "m1:Stage/Screens/Left", "m1:Stage/Screens/Right"])   # by path, too
+        self.assertEqual(ms.selected_keys(), ["m1:Stage/Floor"])               # still selected...
         self.assertIn("1 hidden by the filter", ms.sel_lab.text())           # ...and it says so
         ms.select_shown()
         self.assertEqual(sorted(ms.selected_keys()), shown)
@@ -266,17 +272,17 @@ class Workspace(unittest.TestCase):
         ms.refresh_media()
         ms._choose_media(aid)
         self.assertEqual(ms.clip_lab.text(), "Clip: real clip.mov")
-        ms.select(["Stage/Spill"])
+        ms.select(["m1:Stage/Spill"])
         self.assertIn("about 31% of this surface would show neutral", ms.warn_lab.text())
         self.assertFalse(ms.warn_lab.isHidden())
         ms.apply_selected()
         self.assertIn("shows neutral", ms.warn_lab.text())
         self.assertIn("U -0.1 to 1.1", ms.warn_lab.toolTip())
         rows = {it.data(0, 0x0100): it for it in ms._rows()}
-        self.assertEqual(rows["Stage/Spill"].text(1), "● UV 1 ⚠")
-        ms.select(["Stage/Screens/Centre"])
+        self.assertEqual(rows["m1:Stage/Spill"].text(1), "● UV 1 ⚠")
+        ms.select(["m1:Stage/Screens/Centre"])
         self.assertTrue(ms.warn_lab.isHidden())                              # nothing to say about a clean selection
-        ms.select(["Stage/Screens/Centre", "Stage/Spill", "Stage/Floor"])
+        ms.select(["m1:Stage/Screens/Centre", "m1:Stage/Spill", "m1:Stage/Floor"])
         self.assertIn("1 show the clip", ms.sel_lab.text())
 
     def test_media_list_offers_visual_media_only(self):
@@ -288,42 +294,45 @@ class Workspace(unittest.TestCase):
         self.import_("stage.fbx")
         self.assertIsNotNone(ms.scene)
         rows = {it.data(0, 0x0100): it for it in ms._rows()}
-        self.assertEqual(rows["Stage/Logo_A#2"].text(0), "Logo_A (2)")       # duplicates told apart
-        self.assertEqual(rows["Stage/Truss"].text(1), "no UVs")
-        self.assertEqual(rows["Stage/Spill"].text(1), "")                    # unassigned: no warning...
-        self.assertIn("U -0.1 to 1.1", rows["Stage/Spill"].toolTip(0))       # ...the numbers in its tooltip
-        ms.select(["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"])
+        self.assertEqual(rows["m1:Stage/Logo_A#2"].text(0), "Logo_A (2)")       # duplicates told apart
+        self.assertEqual(rows["m1:Stage/Truss"].text(1), "no UVs")
+        self.assertEqual(rows["m1:Stage/Spill"].text(1), "")                    # unassigned: no warning...
+        self.assertIn("U -0.1 to 1.1", rows["m1:Stage/Spill"].toolTip(0))       # ...the numbers in its tooltip
+        ms.select(["m1:Stage/Screens/Centre", "m1:Stage/Screens/Left", "m1:Stage/Screens/Right"])
         self.assertTrue(ms.apply_btn.isEnabled())
         ms.apply_selected()
-        self.assertEqual(sorted(ms.view.assigned), ["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"])
-        self.assertEqual(rows["Stage/Screens/Centre"].text(1), "● UV 1")
-        self.assertEqual(rows["Stage/Floor"].text(1), "")
-        ms.select(["Stage/Screens/Left"])
+        self.assertEqual(sorted(ms.view.assigned), ["m1:Stage/Screens/Centre", "m1:Stage/Screens/Left", "m1:Stage/Screens/Right"])
+        self.assertEqual(rows["m1:Stage/Screens/Centre"].text(1), "● UV 1")
+        self.assertEqual(rows["m1:Stage/Floor"].text(1), "")
+        ms.select(["m1:Stage/Screens/Left"])
         ms.clear_selected()
-        self.assertNotIn("Stage/Screens/Left", ms.view.assigned)
-        ms.select(["Stage/Screens/Centre", "Stage/Truss"])
+        self.assertNotIn("m1:Stage/Screens/Left", ms.view.assigned)
+        ms.select(["m1:Stage/Screens/Centre", "m1:Stage/Truss"])
         self.assertIn("without UVs", ms.sel_lab.text())
 
     def test_mixed_uv_sets_show_as_mixed(self):
         ms = self.ms
         self.import_("stage.fbx")
-        ms.select(["Stage/Screens/Centre"])
+        ms.select(["m1:Stage/Screens/Centre"])
         ms.uv_box.setCurrentIndex(ms.uv_box.findData(1))
         ms.apply_selected()
-        ms.select(["Stage/Screens/Left"])
+        ms.select(["m1:Stage/Screens/Left"])
         ms.apply_selected()
-        ms.select(["Stage/Screens/Centre", "Stage/Screens/Left"])
+        ms.select(["m1:Stage/Screens/Centre", "m1:Stage/Screens/Left"])
         self.assertEqual(ms.uv_box.itemText(0), "Mixed: choose to set all")
         ms.uv_box.setCurrentIndex(ms.uv_box.findData(0))
         ms._on_uv_chosen(0)
-        self.assertEqual((ms.assign.uv["Stage/Screens/Centre"], ms.assign.uv["Stage/Screens/Left"]), (0, 0))
+        self.assertEqual((ms.assign.uv["m1:Stage/Screens/Centre"], ms.assign.uv["m1:Stage/Screens/Left"]), (0, 0))
 
     def test_group_rows_are_not_selectable(self):
         self.import_("stage.fbx")
         from PySide6.QtCore import Qt
-        stage = self.ms.tree.topLevelItem(0)
+        file = self.ms.tree.topLevelItem(0)
+        self.assertEqual(file.text(0), "stage.fbx")                          # the model file, then its own hierarchy
+        stage = file.child(0)
         self.assertEqual(stage.text(0), "Stage")
-        self.assertFalse(stage.flags() & Qt.ItemFlag.ItemIsSelectable)
+        for row in (file, stage):
+            self.assertFalse(row.flags() & Qt.ItemFlag.ItemIsSelectable)
 
     def test_import_notes_and_errors_are_explained(self):
         d = tempfile.mkdtemp(dir=self.tmp)
@@ -332,26 +341,245 @@ class Workspace(unittest.TestCase):
             fh.write("o Screen\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\no Wire\nv 0 0 1\nv 1 0 1\nl 4 5\n")
         with open(wire, "w") as fh:
             fh.write("o Wire\nv 0 0 1\nv 1 0 1\nl 1 2\n")
-        self.ms.import_scene(wire)                                            # lines only: refused, and why
+        self.ms.add_models([wire])                                            # lines only: refused, and why
         self.assertTrue(pump(self.app, lambda: self.said, 30))
-        self.assertEqual(self.said[-1], ("wire.obj: This file has only lines or points: no surfaces to show media on.", True))
-        self.ms.import_scene(mixed)                                           # surfaces too: imported, lines noted
+        self.assertEqual(self.said[-1], ("wire.obj could not be used: This file has only lines or points: no surfaces to show media on.", True))
+        self.ms.add_models([mixed])                                           # surfaces too: imported, lines noted
         self.assertTrue(pump(self.app, lambda: self.ms.scene is not None, 30))
         pump(self.app, timeout=0.05)
-        self.assertEqual(self.said[-1], ("1 line or point element ignored (only surfaces can show media).", False))
+        self.assertEqual(self.said[-1], ("Added mixed.obj. mixed.obj: 1 line or point element ignored (only surfaces can show media).", False))
         self.assertEqual([o.display for o in self.ms.scene.objects], ["Screen"])
-        self.ms._set_scene(None, "")
+        self.ms._replace_with([])
         self.import_("garbage.fbx")
         self.assertIn("Could not read this scene", self.said[-1][0])
         self.assertIsNone(self.ms.scene)
 
     def test_a_project_change_drops_an_import_in_flight(self):
         ms = self.ms
-        ms.import_scene(os.path.join(FIX, "stage.fbx"))
+        ms.add_models([os.path.join(FIX, "stage.fbx")])
         ms.reset_project()                           # before the helper answers
         pump(self.app, timeout=2.0)
         self.assertIsNone(ms.scene)
-        self.assertTrue(ms.import_btn.isEnabled())
+        self.assertTrue(ms.add_btn.isEnabled())
+
+
+def part(name):
+    return os.path.join(FIX, "parts", name)
+
+
+@unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
+class Composition(_Screen):
+    """One stage from several model files: Add keeps what is there, Replace swaps only on success,
+    cancel and failures are reported per file, and removing a file takes only its objects."""
+    def wait(self):
+        self.assertTrue(pump(self.app, lambda: self.ms._batch is None, 60))
+        pump(self.app, timeout=0.05)
+
+    def keys(self, label):
+        src = next(s for s in self.ms.stage.sources if self.ms.stage.label(s) == label)
+        return [o.key for o in src.objects]
+
+    def test_adding_keeps_the_stage_assignments_clip_and_camera(self):
+        ms = self.ms
+        clip = os.path.join(self.tmp, "clip.mov")
+        open(clip, "wb").close()
+        aid = self.session.project.upsert_asset(clip, kind="video", name="clip.mov", fps="25/1", frames=200, duration=8.0, scan_state="done")
+        ms.refresh_media()
+        ms._choose_media(aid)
+        ms.playhead.begin(200, 77, new=True)
+        self.import_(part("centre.obj"))
+        self.assertGreater(ms.view.dist, 0)                                  # framed on the first file
+        ms.select(self.keys("centre.obj"))
+        ms.apply_selected()
+        ms.view.orbit(40, 10)
+        cam = (ms.view.yaw, ms.view.pitch, ms.view.dist, ms.view.cam_target)
+        ms.add_models([part("left.fbx"), part("right.fbx"), part("venue.obj")])
+        self.assertTrue(ms.cancel_btn.isVisibleTo(ms))
+        self.assertTrue(ms.scene_lab.text().startswith("Adding 1 of 3: left.fbx"), ms.scene_lab.text())
+        self.assertEqual(ms.objects.currentIndex(), 1)                       # the list stays usable meanwhile
+        self.wait()
+        self.assertEqual([ms.stage.label(s) for s in ms.stage.sources], ["centre.obj", "left.fbx", "right.fbx", "venue.obj"])
+        self.assertEqual([ms.tree.topLevelItem(i).text(0) for i in range(ms.tree.topLevelItemCount())],
+                         ["centre.obj", "left.fbx", "right.fbx", "venue.obj"])
+        self.assertEqual(sorted(ms.assign.uv), self.keys("centre.obj"))     # still showing the clip
+        self.assertEqual(sorted(ms.view.assigned), self.keys("centre.obj"))
+        self.assertEqual((ms.view.yaw, ms.view.pitch, ms.view.dist, ms.view.cam_target), cam)
+        self.assertEqual((ms.asset["id"], ms.playhead.frame), (aid, 77))
+        self.assertEqual(ms.scene_lab.text(), "4 model files: 5 objects, 110 triangles")
+        self.assertIn("venue.obj: 1 object without UVs", self.said[-1][0])
+        self.assertTrue(self.said[-1][0].startswith("Added left.fbx, right.fbx and venue.obj."), self.said[-1])
+        self.assertFalse(ms.result.isHidden())
+        self.assertEqual(ms.all_btn.text(), "Apply to all 4 with UVs")       # across every file (Truss has no UVs)
+        ms.view.frame_all()
+        lo, hi = ms.stage.bounds
+        self.assertEqual((round(lo[0], 3), round(hi[0], 3)), (-6.0, 6.0))    # Frame all: the whole composed stage
+
+    def test_same_file_names_and_object_names_stay_apart(self):
+        ms = self.ms
+        self.import_(part("a/screen.obj"), part("b/screen.obj"), part("centre.obj"))
+        labels = [ms.tree.topLevelItem(i).text(0) for i in range(3)]
+        self.assertEqual(labels, ["a/screen.obj", "b/screen.obj", "centre.obj"])
+        b = ms.tree.topLevelItem(1)
+        ms._on_row_clicked(b, 0)                                             # a file's row selects its objects
+        self.assertEqual(ms.selected_keys(), self.keys("b/screen.obj"))
+        self.assertIn("in b/screen.obj", ms.sel_lab.text())
+        self.assertEqual(ms.remove_btn.text(), "Remove b/screen.obj from stage")
+        ms.apply_selected()
+        self.assertEqual(sorted(ms.assign.uv), self.keys("b/screen.obj"))
+        ms.select(self.keys("a/screen.obj"))
+        ms.remove_selected_source()
+        self.assertEqual([s.name for s in ms.stage.sources], ["screen.obj", "centre.obj"])
+        self.assertEqual(ms.stage.sources[0].path, part("b/screen.obj"))
+        self.assertEqual(ms.tree.topLevelItem(0).text(0), "screen.obj")     # no longer needs its folder
+        self.assertEqual(sorted(ms.assign.uv), self.keys("screen.obj"))     # b's assignment untouched
+        self.assertEqual(self.said[-1], ("Removed screen.obj from the stage (the file is unchanged).", False))
+        self.assertTrue(os.path.exists(part("a/screen.obj")))
+
+    def test_the_same_file_is_not_added_twice(self):
+        ms = self.ms
+        self.import_(part("centre.obj"))
+        self.import_(os.path.join(FIX, "parts", "a", "..", "centre.obj"), part("left.fbx"), part("left.fbx"))
+        self.assertEqual([ms.stage.label(s) for s in ms.stage.sources], ["centre.obj", "left.fbx"])
+        self.assertEqual(self.said[-1][0], "Added left.fbx. centre.obj: already on the stage as centre.obj, not added again. "
+                                           "left.fbx: chosen twice.")
+        self.import_(part("centre.obj"))                                     # nothing new at all: said, nothing read
+        self.assertEqual(len(ms.stage.sources), 2)
+        self.assertIn("already on the stage", self.said[-1][0])
+
+    def test_a_batch_with_a_damaged_file_adds_the_rest(self):
+        ms = self.ms
+        self.import_(part("centre.obj"), os.path.join(FIX, "garbage.fbx"), part("left.fbx"))
+        self.assertEqual([s.name for s in ms.stage.sources], ["centre.obj", "left.fbx"])
+        text, bad = self.said[-1]
+        self.assertTrue(bad)
+        self.assertTrue(text.startswith("Added 2 of 3 model files: centre.obj and left.fbx. garbage.fbx could not be used: "), text)
+        self.assertFalse(ms.result.isHidden())
+        self.assertIn("garbage.fbx", ms.result_lab.text())
+
+    def test_cancelling_an_add_keeps_what_it_added(self):
+        ms = self.ms
+        ms.add_models([part("centre.obj"), os.path.join(FIX, "stage.fbx"), part("left.fbx"), part("right.fbx")])
+        self.assertTrue(pump(self.app, lambda: len(ms.stage.sources) == 1, 30))
+        ms.cancel_import()
+        self.assertIsNone(ms._batch)
+        pump(self.app, timeout=3.0)                                          # a late answer must not land
+        self.assertEqual([s.name for s in ms.stage.sources], ["centre.obj"])
+        self.assertEqual(self.said[-1][0], "Cancelled: centre.obj added (kept on the stage); stage.fbx, left.fbx and right.fbx not read.")
+        self.assertTrue(ms.add_btn.isEnabled() and ms.replace_btn.isEnabled())
+
+    def test_replace_swaps_only_what_could_be_read(self):
+        ms = self.ms
+        self.import_(part("centre.obj"))
+        ms.select(self.keys("centre.obj"))
+        ms.apply_selected()
+        ms.view.orbit(40, 0)
+        ms.replace_stage([os.path.join(FIX, "garbage.fbx"), part("left.fbx")])
+        self.assertTrue(ms.scene_lab.text().startswith("Reading 1 of 2: garbage.fbx"), ms.scene_lab.text())
+        self.assertEqual([s.name for s in ms.stage.sources], ["centre.obj"])   # not cleared at the start
+        self.wait()
+        self.assertEqual([s.name for s in ms.stage.sources], ["left.fbx"])
+        self.assertEqual(ms.assign.uv, {})
+        self.assertTrue(self.said[-1][0].startswith("Stage replaced with 1 of 2 model files. garbage.fbx could not be used"), self.said[-1])
+        self.assertEqual(ms.view.yaw, 0.0)                                   # a new stage is framed afresh
+        ms.select(self.keys("left.fbx"))
+        ms.apply_selected()
+        self.import_(os.path.join(FIX, "garbage.fbx"), os.path.join(FIX, "truncated.obj"), replace=True)
+        self.assertEqual([s.name for s in ms.stage.sources], ["left.fbx"])    # nothing usable: unchanged
+        self.assertEqual(sorted(ms.assign.uv), self.keys("left.fbx"))
+        self.assertTrue(self.said[-1][0].startswith("The stage is unchanged: none of the files could be used."), self.said[-1])
+        ms.replace_stage([part("right.fbx"), part("venue.obj")])
+        ms.cancel_import()
+        pump(self.app, timeout=3.0)
+        self.assertEqual([s.name for s in ms.stage.sources], ["left.fbx"])
+        self.assertEqual(self.said[-1][0], "Replace cancelled: the stage is unchanged.")
+        self.import_(part("right.fbx"), part("venue.obj"), replace=True)
+        self.assertEqual([s.name for s in ms.stage.sources], ["right.fbx", "venue.obj"])
+        self.assertEqual(self.said[-1][0], "Stage replaced. venue.obj: 1 object without UVs (shown neutral).")
+
+    def test_a_project_change_mid_batch_drops_the_rest(self):
+        ms = self.ms
+        ms.add_models([part("centre.obj"), os.path.join(FIX, "stage.fbx"), part("left.fbx")])
+        self.assertTrue(pump(self.app, lambda: len(ms.stage.sources) == 1, 30))
+        ms.reset_project()
+        pump(self.app, timeout=3.0)
+        self.assertIsNone(ms.scene)
+        self.assertIsNone(ms._batch)
+        self.assertEqual(ms.objects.currentIndex(), 0)
+        self.assertTrue(ms.add_btn.isEnabled())
+
+    def test_removing_files_down_to_an_empty_stage(self):
+        ms = self.ms
+        self.import_(part("centre.obj"), part("left.fbx"), part("venue.obj"))
+        ms.apply_all()
+        ms.select(self.keys("left.fbx"))
+        self.assertTrue(ms.remove_btn.isVisibleTo(ms))
+        self.assertIn("The file itself is not changed", ms.remove_btn.toolTip())
+        ms.remove_selected_source()
+        self.assertEqual(sorted(ms.view.assigned), sorted(k for k in ms.assign.uv))
+        self.assertEqual(len(ms.assign.uv), 2)                               # centre and the floor
+        self.assertEqual(ms.selected_keys(), [])
+        self.assertFalse(ms.remove_btn.isVisibleTo(ms))
+        ms.select([*self.keys("centre.obj"), *self.keys("venue.obj")])       # two files: no single one to remove
+        self.assertFalse(ms.remove_btn.isVisibleTo(ms))
+        for sid in [s.id for s in ms.stage.sources]:
+            ms.remove_source(sid)
+        self.assertIsNone(ms.scene)
+        self.assertIsNone(ms.assign)
+        self.assertEqual(ms.view.scene, None)
+        self.assertEqual(ms.objects.currentIndex(), 0)
+        self.assertIn("Add one or more", ms.empty_lab.text())
+        self.assertFalse(ms.replace_btn.isEnabled())
+        self.assertEqual(ms.scene_lab.text(), "No stage imported")
+        self.import_(part("right.fbx"))                                      # and starts again
+        self.assertEqual(len(ms.stage.sources), 1)
+
+    def test_filter_and_selection_across_files(self):
+        ms = self.ms
+        self.import_(part("centre.obj"), part("left.fbx"), part("venue.obj"), part("a/screen.obj"))
+        ms.select(self.keys("venue.obj")[:1])                                # Floor
+        ms.filter.setText("screen")
+        shown = [it.data(0, 0x0100) for it in ms._rows() if not ms._hidden(it)]
+        self.assertEqual(len(shown), 3)                                      # a Screen in three files
+        self.assertTrue(ms.tree.topLevelItem(2).isHidden())                  # venue.obj: nothing shown
+        self.assertIn("1 hidden by the filter", ms.sel_lab.text())
+        ms.select_shown()
+        self.assertEqual(sorted(ms.selected_keys()), sorted(shown))
+        self.assertEqual(ms.apply_btn.text(), "Apply clip to 3 selected")
+        self.assertFalse(ms.remove_btn.isVisibleTo(ms))
+        ms.apply_selected()
+        ms.filter.clear()
+        self.assertEqual(sorted(ms.assign.uv), sorted(shown))
+        self.assertEqual(ms.all_btn.text(), "Apply to all 4 with UVs")
+
+    def test_many_objects_in_several_files_stay_quick(self):
+        """Four files of 5,000 objects: adding each, selecting all, applying, filtering and removing
+        one. Hardening made one 20,000-object file quick; composing must not bring back quadratic work."""
+        from array import array
+        from nitpix.scene import Geometry, NormalizedScene, SceneObject, uv_range
+        pos, idx, uv = array("f", [0, 0, 0, 1, 0, 0, 0, 1, 0]), array("I", [0, 1, 2]), array("f", [0, 0, 1, 0, 0, 1])
+        world = tuple(float(i == j) for i in range(4) for j in range(4))
+
+        def scene(n, tag):
+            g = Geometry("mesh:0", pos, idx, (uv,), "Screen", "f", (uv_range(uv, idx, pos),))
+            objs = tuple(SceneObject(f"Rig/Panel_{i:05d}", ("Rig", f"Panel_{i:05d}"), f"Panel_{i:05d}", ("mesh:0",), ("Screen",),
+                                     world, 1, 1, False, None, "f") for i in range(n))
+            return NormalizedScene({"path": f"/generated/{tag}/rig.obj"}, "test", objs, {"mesh:0": g}, ((0, 0, 0), (1, 1, 0)))
+        ms = self.ms
+        scenes = [scene(5000, t) for t in "abcd"]
+        t = time.monotonic()
+        for sc in scenes:
+            ms._add_scene(sc)
+        ms.select_shown()
+        ms.apply_selected()
+        ms.filter.setText("Panel_0499")
+        ms.select_shown()
+        ms.remove_source(ms.stage.sources[1].id)
+        took = time.monotonic() - t
+        self.assertEqual(len(ms.stage.objects), 15000)
+        self.assertEqual(len(ms.assign.uv), 15000)
+        self.assertEqual(len(ms.selected_keys()), 30)                        # ten in each of the three left
+        self.assertEqual(ms.tree.topLevelItem(0).text(0), "a/rig.obj")
+        self.assertLess(took, 20)
 
 
 @unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
@@ -501,7 +729,7 @@ class OneSession(unittest.TestCase):
         w.show_asset(self.a)
         w.show_view("mapping")
         ms = w.mapping
-        ms._set_scene(load_scene(os.path.join(FIX, "stage.fbx")), "stage.fbx")
+        ms._replace_with([load_scene(os.path.join(FIX, "stage.fbx"))])
         toggles = []
         ms.toggle_play = lambda: toggles.append(1)
         ms.view.frame_all = lambda *a, **k: toggles.append("f")
@@ -529,8 +757,8 @@ class OneSession(unittest.TestCase):
         w.show_asset(self.a)
         w.show_view("mapping")
         ms = w.mapping
-        ms._set_scene(load_scene(os.path.join(FIX, "stage.fbx")), "stage.fbx")
-        ms.select(["Stage/Screens/Centre"])                                  # two UV sets: the UV selector is live
+        ms._replace_with([load_scene(os.path.join(FIX, "stage.fbx"))])
+        ms.select(["m1:Stage/Screens/Centre"])                                  # two UV sets: the UV selector is live
         toggles = []
         ms.toggle_play = lambda: toggles.append(1)
 
@@ -595,7 +823,7 @@ class OneSession(unittest.TestCase):
         w = self.window()
         w.ensure_mapping()
         w.show_view("mapping")
-        w.mapping._set_scene(load_scene(os.path.join(FIX, "stage.obj")), "stage.obj")
+        w.mapping._replace_with([load_scene(os.path.join(FIX, "stage.obj"))])
         w.close_project()
         self.assertIsNone(w.mapping.scene)
         self.assertEqual(w.current_view, "start")

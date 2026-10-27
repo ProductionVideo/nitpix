@@ -82,8 +82,12 @@ Mapping shows a project's media on an imported stage model while it plays, so yo
 To use it:
 
 1. Choose the **Clip** at the top: any video, image sequence or still in the project. Every assigned object shows that one clip, on one shared clock.
-2. **Import stage…** reads an OBJ or FBX file. The import runs in a separate process, so the window and playback carry on. Cancel stops the import itself.
-3. Find objects in the list. **Filter objects** matches names and paths (Esc clears it), and **Select shown** selects everything the filter shows. ⌘/⇧-click selects several. Filtering never changes the selection or assignments; the panel says when part of the selection is hidden.
+2. **Add models…** reads one or more OBJ or FBX files into the stage. Several files form one stage: each keeps the position, orientation and scale it was exported with (nothing is centred or fitted per file), so separately exported screens and a venue model line up as they do in the show file. Files are read one at a time in a separate process, so the window and playback carry on. Each file appears as soon as it is read. Adding never changes what is already on the stage: its objects, assignments, the clip, the playback position and the camera stay. Only the first file into an empty stage frames the view.
+   - **If a file cannot be used,** the others are still added. A note above the list, and the toast, name each file and the reason. A file that is already on the stage is not added again.
+   - **Cancel** stops the file being read and any still waiting. Files already added stay.
+   - **Replace stage…** swaps the whole stage for other files. The current stage stays until they have been read, then is replaced once with every file that could be used. If none could be used, or you cancel, the stage is unchanged.
+   - **Remove** takes one file's objects (and their assignments) off the stage. Use the button under the list when the selection comes from one file, or right-click the file's row. The file on disk is never changed.
+3. Find objects in the list, grouped by model file (two files with the same name show their folder too). Clicking a file's row selects its objects. **Filter objects** matches names and paths (Esc clears it), and **Select shown** selects everything the filter shows. ⌘/⇧-click selects several. Filtering never changes the selection or assignments; the panel says when part of the selection is hidden.
 4. The panel below the list says what is selected, how much of it already shows the clip, and which clip **Apply clip to N selected** will use. **Clear N** returns objects to neutral, and **Apply to all N with UVs** assigns every object that can show media.
 5. Pick which of the objects' own UV sets to use. For objects already showing the clip the change applies at once. If the chosen set runs outside the image, the panel says how much of the surface is, or would be, neutral; its tooltip has the exact ranges.
 6. Use the usual transport keys (Space, ← →, ⇧← ⇧→, Home, End) and the timeline. Drag to orbit, right-drag or ⇧-drag to pan, scroll to zoom: the hint under the view goes once you have used it. **F** (Frame all) fits the whole stage in view; **Reset view** also returns to the front.
@@ -97,7 +101,7 @@ Rules and current limits:
 - **Preview resolution:** media over 3840 px on the long side is downscaled for this spatial preview; QC still plays it at full size.
 - **Colours are display-referred:** the same picture as the QC player, but unlit and shown as an 8-bit preview. This is not an LED processor simulation.
 - **One playback session at a time:** moving between QC and Mapping hands over the position, and only one of them plays.
-- **Session only:** the imported stage, assignments and camera last until you close the project or quit. Nothing is saved with the project yet.
+- **Session only:** the stage (all its model files), assignments and camera last until you close the project or quit. Nothing is saved with the project yet.
 - **Scenes containing lines or points** (splines, guides) are refused with an explanation. Export surfaces only.
 - **Out of scope:** UV offset/scale, separate media per object, animation, lighting/PBR, projection or calibration, and output.
 
@@ -110,9 +114,9 @@ What works and what does not, as tested (generated fixtures, plus a survey of 37
 | **Imports, but shows little or no media** | Objects without UVs (about one model in six in the survey); UVs made for a repeating material or world-scaled rather than laid out for the media (about one in eight was mostly outside the image). The model needs a UV set for the media |
 | **Refused, with a reason** | FBX containing lines or points; files of lines or points only; damaged or empty files; FBX the importer cannot read (it names the FBX version) |
 | **Slow** | Stages of tens of thousands of objects: each object is drawn separately, so 20,000 objects run at about 8 frames/s and a 135,000-object venue model at about 1 frame/s (it also needed 14 GB). Export the screens you need, or join meshes that share a surface |
-| **Not supported** | Several model files as one stage (one import replaces the stage); assigning per material slot; UV offset, scale, repeat or fitting; saving the stage and assignments with the project; other formats (glTF, USD, 3DS, Alembic) |
+| **Not supported** | Moving, rotating or scaling a model file in nitpix (export it where it belongs); adding one file twice; assigning per material slot; UV offset, scale, repeat or fitting; saving the stage and assignments with the project; other formats (glTF, USD, 3DS, Alembic) |
 
-`tests/fixtures/scenes/` has small generated stages to try it with (`stage.fbx`, `stage_cm_zup.fbx`, `stage.obj`). They include three screens, a floor, a truss without UVs, instances, duplicate names, a mirrored panel and UVs that run past 0–1. `uvedge.fbx` has UVs at and past the image's edge, tiled UVs and an object with two different UV sets.
+`tests/fixtures/scenes/` has small generated stages to try it with (`stage.fbx`, `stage_cm_zup.fbx`, `stage.obj`). They include three screens, a floor, a truss without UVs, instances, duplicate names, a mirrored panel and UVs that run past 0–1. `uvedge.fbx` has UVs at and past the image's edge, tiled UVs and an object with two different UV sets. `parts/` is one stage exported as separate files: a centre screen (OBJ), side screens placed by their FBX node transforms (one authored in centimetres, Z up), a venue, and two `screen.obj` files in different folders. Add them together to try a composed stage.
 
 ### Renamed from LHS-QC Review
 
@@ -290,9 +294,10 @@ Before a release, on the Mac that builds it. None of this touches your installed
    NITPIX_PREFS_DIR=/tmp/rc/prefs NITPIX_STATE_DIR=/tmp/rc/state \
    NITPIX_SCREENSHOT=/tmp/rc/shot.png NITPIX_SCREENSHOT_STAGE=tests/fixtures/scenes/stage.fbx \
    NITPIX_SCREENSHOT_SLOW=<a large OBJ> NITPIX_SCREENSHOT_BAD=<a damaged FBX> \
+   NITPIX_SCREENSHOT_PARTS=tests/fixtures/scenes/parts \
    /tmp/rc/nitpix.app/Contents/MacOS/nitpix /tmp/rc/check.nitpix
    ```
-   It walks Mapping (sidebar, Space on the clip selector, import / cancel / restart, damaged file, filter and apply, clear, UV set, camera while playing, scrub and step, clip change, QC and back, close and reopen the project, quit while playing) and prints PASS / FAIL per step, with player errors and event-loop stalls. Pass the project as the only argument: macOS opens command-line paths as documents.
+   It walks Mapping (sidebar, Space on the clip selector, add / cancel / restart, damaged file added and as a replacement, filter and apply, clear, UV set, camera while playing, adding model files while playing and removing one, scrub and step, clip change, QC and back, close and reopen the project, quit while playing) and prints PASS / FAIL per step, with player errors and event-loop stalls. Pass the project as the only argument: macOS opens command-line paths as documents.
 4. By hand, on a real keyboard and mouse: Space with the clip list focused after choosing a clip; orbit, pan (right-drag and ⇧-drag) and pinch/scroll zoom on a trackpad; audio follows the screen you are on.
 5. Publish (`gh release create vX.Y.Z dist/nitpix-X.Y.Z.dmg`), then check that the in-app update check offers it and that `install.sh` with `NITPIX_INSTALL_DIR=<scratch> NITPIX_NO_OPEN=1` installs it.
 

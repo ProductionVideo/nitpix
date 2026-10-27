@@ -8,6 +8,7 @@ between QC and Mapping with a seek pending. Needs libmpv, ffmpeg, assimp-py and 
 Pixel readback here is verification only; the view never reads frames back.
 """
 import os as _os, tempfile as _tempfile; _os.environ.setdefault("NITPIX_STATE_DIR", _tempfile.mkdtemp(prefix="nitpix state "))  # keep the real recent list untouched
+import collections
 import importlib.util
 import os
 import shutil
@@ -18,6 +19,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures", "scenes")
+PARTS = os.path.join(FIX, "parts")
 LIVE = (os.environ.get("NITPIX_LIVE_PLAYER") == "1" and importlib.util.find_spec("PySide6") is not None
         and importlib.util.find_spec("assimp_py") is not None)
 if LIVE:
@@ -175,6 +177,41 @@ class Drawn(unittest.TestCase):
                     v.set_assignments({**{key(k): 0 for k in shows}, key("Centre"): 1})
                     pump(0.2)
                     self.assertTrue(like(self.pixel(v, v.grabFramebuffer(), p), RED))          # UV 2: PixelMap -> the red corner
+
+    def test_separate_files_draw_in_place_the_right_way_round(self):
+        """Three screens exported as separate files (an OBJ, a node-placed FBX, a centimetre Z-up
+        FBX) and a venue: each shows the picture the right way up and round, where it was authored;
+        the venue stays neutral. Then files leave: their meshes are released, the rest still draw."""
+        from nitpix.stage import Stage
+        RED, GREEN, BLUE, YELLOW = (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)
+        like = lambda got, want: all(abs(a - b) <= 60 for a, b in zip(got, want))
+        grey = lambda c: max(c) - min(c) <= 12 and 25 <= c[0] <= 150
+        st = Stage()
+        src = {n: st.add(load_scene(os.path.join(PARTS, n))) for n in ("centre.obj", "left.fbx", "right.fbx", "venue.obj")}
+        screens = [o.key for n in ("centre.obj", "left.fbx", "right.fbx") for o in src[n].objects]
+        v = self.make()
+        v.set_scene(st)
+        v.set_assignments({k: 0 for k in screens})
+        v.yaw, v.pitch = 0.0, 20.0                                     # from the audience, a little above
+        self.load(v, self.corners, 10)
+        img = v.grabFramebuffer()
+        for k in screens:
+            for (u, vv), want in (((0.06, 0.9), RED), ((0.94, 0.9), GREEN), ((0.06, 0.1), BLUE), ((0.94, 0.1), YELLOW)):
+                c = self.pixel(v, img, point_at_uv(st, k, u, vv))
+                self.assertTrue(like(c, want), (k, u, vv, c))
+        floor = next(o.key for o in src["venue.obj"].objects if o.display == "Floor")
+        self.assertTrue(grey(self.pixel(v, img, (0.0, 0.0, -4.0))), floor)
+        self.assertEqual(len(v._meshes), 5)
+        st.remove(src["left.fbx"].id)
+        v.set_scene(st, frame=False)
+        v.set_assignments({k: 0 for k in screens if st.object(k)})
+        pump(0.2)
+        self.assertEqual(len(v._meshes), 4)
+        img = v.grabFramebuffer()
+        self.assertTrue(like(self.pixel(v, img, point_at_uv(st, screens[0], 0.06, 0.9)), RED))
+        v.set_scene(None)
+        pump(0.2)
+        self.assertEqual(v._meshes, {})                               # the last ones released too
 
     def test_uv_edge_noise_shows_media_and_real_overshoot_stays_neutral(self):
         """uvedge.fbx with the corners clip. Close up (1 cm from the surface, about 10 µm a pixel),
@@ -343,14 +380,17 @@ class Switching(unittest.TestCase):
                              **summary_fields(normalise(ffprobe(self.clip), self.clip)))
         w.ensure_mapping()
         rv, ms = w.review, w.mapping
+        errors = []
+        rv.player.error.connect(errors.append)
+        ms.view.error.connect(errors.append)
         one_session = lambda: [x for x in (rv.player.m.path, ms.view.m.path) if x]
         w.show_asset(aid)
         end = time.monotonic() + 10
         while not rv.player.loaded and time.monotonic() < end:
             pump(0.01)
         pump(0.4)
-        ms._set_scene(load_scene(os.path.join(FIX, "stage.fbx")), "stage.fbx")
-        ms.assign.apply(["Stage/Screens/Centre"])
+        ms._replace_with([load_scene(os.path.join(FIX, "stage.fbx"))])
+        ms.assign.apply(["m1:Stage/Screens/Centre"])
         ms._changed()
 
         def texture_frame():
@@ -411,20 +451,59 @@ class Switching(unittest.TestCase):
             ms.filter.setText(text)
             ms.select_shown()
             pump(0.03)
-        ms.select(["Stage/Screens/Left", "Stage/Screens/Right", "Stage/Spill"])
+        ms.select(["m1:Stage/Screens/Left", "m1:Stage/Screens/Right", "m1:Stage/Spill"])
         ms.apply_selected()
         pump(0.05)
-        ms.select(["Stage/Screens/Centre"])
+        ms.select(["m1:Stage/Screens/Centre"])
         ms.uv_box.setCurrentIndex(ms.uv_box.findData(1))
         ms._on_uv_chosen(ms.uv_box.currentIndex())
-        ms.select(["Stage/Screens/Left"])
+        ms.select(["m1:Stage/Screens/Left"])
         ms.clear_selected()
         pump(0.4)
         ms.view.m.command, ms.view.m.command_async = orig
         self.assertEqual(sent, [])
         self.assertFalse(ms.view.paused)
         self.assertGreater(ms.view.frame, f0 + 10)                # still advancing
-        self.assertEqual(ms.assign.uv, {"Stage/Screens/Centre": 1, "Stage/Screens/Right": 0, "Stage/Spill": 0})
+        self.assertEqual(ms.assign.uv, {"m1:Stage/Screens/Centre": 1, "m1:Stage/Screens/Right": 0, "m1:Stage/Spill": 0})
+
+        # More model files while it plays: the helper reads them, the stage grows, nothing reaches
+        # the player, the clip keeps advancing, assignments and camera stay; then one file goes.
+        gl, paint = [], ms.view.paintGL
+        ms.view.paintGL = lambda: (paint(), gl.append(ms.view.context().functions().glGetError()))
+        ms.view.stats = collections.deque(maxlen=2000)
+        ms.view.m.command = lambda *a, **k: (sent.append(a), orig[0](*a, **k))[1]
+        ms.view.m.command_async = lambda *a, **k: (sent.append(a), orig[1](*a, **k))[1]
+        cam = (ms.view.yaw, ms.view.dist, ms.view.cam_target)
+        f0 = ms.view.frame
+        meshes = len(ms.view._meshes)
+        ms.add_models([os.path.join(PARTS, n) for n in ("centre.obj", "left.fbx", "right.fbx")])
+        end = time.monotonic() + 30
+        while ms._batch is not None and time.monotonic() < end:
+            ms.view.orbit(1, 0)
+            pump(0.01)
+        pump(0.3)
+        self.assertEqual(len(ms.stage.sources), 4)
+        self.assertEqual(len(ms.view._meshes), meshes + 3)                 # only the new ones uploaded
+        self.assertEqual(sent, [])
+        self.assertFalse(ms.view.paused)
+        self.assertGreater(ms.view.frame, f0 + 10)
+        self.assertEqual(ms.assign.uv, {"m1:Stage/Screens/Centre": 1, "m1:Stage/Screens/Right": 0, "m1:Stage/Spill": 0})
+        self.assertEqual((ms.view.dist, ms.view.cam_target), cam[1:])
+        ms.select([o.key for s in ms.stage.sources[1:] for o in s.objects])
+        ms.apply_selected()
+        pump(0.3)
+        ms.remove_source("m1")                                            # the first stage file, assigned, while playing
+        pump(0.4)
+        self.assertEqual(len(ms.view._meshes), 3)
+        self.assertEqual(sorted(ms.assign.uv), ["m2:Screen", "m3:Screen", "m4:Rig/Screen"])
+        self.assertEqual(sent, [])
+        self.assertFalse(ms.view.paused)
+        slow = sorted(p[1] for p in ms.view.stats)[-1]
+        print(f"\n  composed stage: longest paint while adding/removing {slow * 1000:.1f} ms over {len(ms.view.stats)} paints")
+        self.assertLess(slow, 0.25)
+        ms.view.m.command, ms.view.m.command_async = orig
+        self.assertEqual(sorted(set(gl)), [0])
+        self.assertEqual(errors, [])
         t = time.monotonic()
         w.close()                                                  # quit while Mapping plays
         self.assertLess(time.monotonic() - t, 3.0)
