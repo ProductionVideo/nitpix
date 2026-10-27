@@ -325,15 +325,22 @@ class Workspace(unittest.TestCase):
         self.assertEqual(stage.text(0), "Stage")
         self.assertFalse(stage.flags() & Qt.ItemFlag.ItemIsSelectable)
 
-    def test_import_errors_are_explained(self):
+    def test_import_notes_and_errors_are_explained(self):
         d = tempfile.mkdtemp(dir=self.tmp)
-        p = os.path.join(d, "mixed.obj")
-        with open(p, "w") as fh:
+        mixed, wire = os.path.join(d, "mixed.obj"), os.path.join(d, "wire.obj")
+        with open(mixed, "w") as fh:
             fh.write("o Screen\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\no Wire\nv 0 0 1\nv 1 0 1\nl 4 5\n")
-        self.ms.import_scene(p)
+        with open(wire, "w") as fh:
+            fh.write("o Wire\nv 0 0 1\nv 1 0 1\nl 1 2\n")
+        self.ms.import_scene(wire)                                            # lines only: refused, and why
         self.assertTrue(pump(self.app, lambda: self.said, 30))
-        self.assertIn("lines or points", self.said[-1][0])
-        self.assertTrue(self.said[-1][1])
+        self.assertEqual(self.said[-1], ("wire.obj: This file has only lines or points: no surfaces to show media on.", True))
+        self.ms.import_scene(mixed)                                           # surfaces too: imported, lines noted
+        self.assertTrue(pump(self.app, lambda: self.ms.scene is not None, 30))
+        pump(self.app, timeout=0.05)
+        self.assertEqual(self.said[-1], ("1 line or point element ignored (only surfaces can show media).", False))
+        self.assertEqual([o.display for o in self.ms.scene.objects], ["Screen"])
+        self.ms._set_scene(None, "")
         self.import_("garbage.fbx")
         self.assertIn("Could not read this scene", self.said[-1][0])
         self.assertIsNone(self.ms.scene)
