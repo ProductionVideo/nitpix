@@ -23,7 +23,11 @@ def main():
     ap.add_argument("--no-browser", action="store_true", help="With --web: do not open a browser window")
     ap.add_argument("--selfcheck", nargs="?", const=True, metavar="MEDIA",
                     help="Report the tools this installation found (JSON) and exit; with a media file, try to decode it")
+    ap.add_argument("--scene-import", nargs=2, metavar=("SCENE", "OUT"), help=argparse.SUPPRESS)  # the Mapping importer's helper process
     a = ap.parse_args()
+    if a.scene_import:
+        from nitpix.sceneimport import run_helper
+        sys.exit(run_helper(*a.scene_import))
     if a.selfcheck:
         import json
         from nitpix.selfcheck import run as selfcheck
