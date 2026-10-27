@@ -31,12 +31,109 @@ from types import SimpleNamespace
 
 FORMATS = (".obj", ".fbx")
 _HELPER = "_$AssimpFbx$_"
+# How far beyond 0-1 a UV may fall and still count as the image's edge: export and float noise, not
+# authored placement. Within it the picture's edge is sampled; beyond it the surface is neutral.
+# Half a texel of the largest preview texture (3840 px, nitpix/ui/mapview.py) is 1.3e-4, so the
+# shift is never visible; exporters that round UVs to four decimals are off by up to 5e-5. One
+# value for the import diagnostics, nitpix/mapping.py and the view's shader.
+UV_EDGE = 1e-4
 LINES_MESSAGE = ("This file has lines or points (splines, guides) as well as surfaces, and the importer "
                  "cannot skip them yet. Export the surfaces only and import again.")
 
 
 class SceneImportError(Exception):
     """A scene that cannot be used; the message is written for the person importing it."""
+
+
+@dataclass(frozen=True)
+class UVRange:
+    """Where one UV set falls on the triangles of a mesh (or several). Vertices no triangle uses
+    are left out: they cover no surface."""
+    u: tuple                      # (min, max)
+    v: tuple
+    outside: int                  # triangles with a corner beyond 0-1 by more than UV_EDGE
+    triangles: int
+    area: float = 0.0             # surface area of the triangles, in the mesh's own units
+    neutral: float = 0.0          # the part of it whose UVs fall beyond 0-1: shown neutral
+
+    @property
+    def overshoot(self) -> float:
+        """How far the farthest corner lies beyond 0-1 (0 when all are on the image)."""
+        return max(0.0, -self.u[0], self.u[1] - 1, -self.v[0], self.v[1] - 1)
+
+    @property
+    def neutral_share(self) -> float:
+        return self.neutral / self.area if self.area > 0 else (1.0 if self.outside else 0.0)
+
+    @staticmethod
+    def join(ranges) -> "UVRange | None":
+        ranges = [r for r in ranges if r.triangles]
+        if not ranges:
+            return None
+        return UVRange((min(r.u[0] for r in ranges), max(r.u[1] for r in ranges)),
+                       (min(r.v[0] for r in ranges), max(r.v[1] for r in ranges)),
+                       sum(r.outside for r in ranges), sum(r.triangles for r in ranges),
+                       sum(r.area for r in ranges), sum(r.neutral for r in ranges))
+
+
+def uv_range(uv: array, indices: array, positions: array | None = None) -> UVRange:
+    """UVRange of one UV set. With positions, also how much surface shows neutral: within a
+    triangle UVs are linear over the surface, so its share inside the image is the share of its
+    UV-space area that lies inside 0-1 (clipped exactly)."""
+    us, vs = uv[0::2], uv[1::2]
+    if not indices:
+        return UVRange((0.0, 0.0), (0.0, 0.0), 0, 0)
+    used = set(indices)
+    ru, rv = (us, vs) if len(used) == len(us) else ([us[i] for i in used], [vs[i] for i in used])
+    lo, hi = -UV_EDGE, 1 + UV_EDGE
+    off = [not (lo <= a <= hi and lo <= b <= hi) for a, b in zip(us, vs)]
+    outside, area, neutral = 0, 0.0, 0.0
+    flagged = any(off)
+    for t in range(0, len(indices), 3):
+        a, b, c = indices[t], indices[t + 1], indices[t + 2]
+        if positions is not None:
+            ta = _area3(positions, a, b, c)
+            area += ta
+        if flagged and (off[a] or off[b] or off[c]):
+            outside += 1
+            if positions is not None:
+                neutral += ta * (1.0 - _inside_share(((us[a], vs[a]), (us[b], vs[b]), (us[c], vs[c])), lo, hi))
+    return UVRange((min(ru), max(ru)), (min(rv), max(rv)), outside, len(indices) // 3, area, neutral)
+
+
+def _area3(p, a, b, c) -> float:
+    ax, ay, az = p[3 * a], p[3 * a + 1], p[3 * a + 2]
+    ux, uy, uz = p[3 * b] - ax, p[3 * b + 1] - ay, p[3 * b + 2] - az
+    vx, vy, vz = p[3 * c] - ax, p[3 * c + 1] - ay, p[3 * c + 2] - az
+    return 0.5 * ((uy * vz - uz * vy) ** 2 + (uz * vx - ux * vz) ** 2 + (ux * vy - uy * vx) ** 2) ** 0.5
+
+
+def _area2(poly) -> float:
+    return abs(sum(poly[i][0] * poly[i - 1][1] - poly[i - 1][0] * poly[i][1] for i in range(len(poly)))) / 2
+
+
+def _inside_share(tri, lo, hi) -> float:
+    """The share of a UV triangle's area inside [lo, hi]², by clipping it to that square."""
+    whole = _area2(tri)
+    if whole <= 1e-18:                    # degenerate in UV: inside if its middle is
+        mu, mv = sum(p[0] for p in tri) / 3, sum(p[1] for p in tri) / 3
+        return 1.0 if lo <= mu <= hi and lo <= mv <= hi else 0.0
+    poly = list(tri)
+    for axis, bound, keep_above in ((0, lo, True), (0, hi, False), (1, lo, True), (1, hi, False)):
+        out = []
+        for i, cur in enumerate(poly):
+            prev = poly[i - 1]
+            cin = (cur[axis] >= bound) if keep_above else (cur[axis] <= bound)
+            pin = (prev[axis] >= bound) if keep_above else (prev[axis] <= bound)
+            if cin != pin:
+                k = (bound - prev[axis]) / (cur[axis] - prev[axis])
+                out.append((prev[0] + k * (cur[0] - prev[0]), prev[1] + k * (cur[1] - prev[1])))
+            if cin:
+                out.append(cur)
+        poly = out
+        if len(poly) < 3:
+            return 0.0
+    return min(1.0, _area2(poly) / whole)
 
 
 @dataclass(frozen=True)
@@ -48,6 +145,7 @@ class Geometry:
     uv_sets: tuple                # of array('f'), u v per vertex, exactly as authored
     material: str
     fingerprint: str              # positions, triangles and every UV set
+    uv_ranges: tuple = ()         # UVRange per UV set
 
     @property
     def triangles(self) -> int:
@@ -64,7 +162,7 @@ class SceneObject:
     world: tuple                  # 16 floats, column-major: object space -> scene (metres, Y up)
     uv_sets: int                  # UV sets present on every slot (0: cannot show media)
     triangles: int
-    outside_0_1: bool             # some UVs fall outside the image
+    outside_0_1: bool             # some triangles reach outside the image in the first UV set
     issue: str | None             # why it cannot show media, if it cannot
     fingerprint: str              # geometry and UVs only: moving an object keeps its mapping
 
@@ -145,7 +243,8 @@ def load_scene(path: str, cancel: threading.Event | None = None) -> NormalizedSc
         warnings.append(f"{no_uv} object{'s' if no_uv > 1 else ''} without UVs (shown neutral).")
     outside = sum(1 for o in objects if o.outside_0_1)
     if outside:
-        warnings.append(f"{outside} object{'s' if outside > 1 else ''} with UVs outside the image (shown neutral there).")
+        warnings.append(f"{outside} object{'s' if outside > 1 else ''} with UVs partly outside the image (UV 1): "
+                        "where assigned, those parts show neutral.")
     return NormalizedScene(source={"path": os.path.abspath(path), "size": st.st_size, "mtime": st.st_mtime, "sha256": _sha256(path)},
                            importer=importer_version(), objects=tuple(objects), geometries=geometries,
                            bounds=_bounds(objects, geometries), warnings=tuple(warnings))
@@ -203,7 +302,8 @@ def _geometries(raw, cancel) -> tuple[dict, int]:
             h.update(b"uv")
             h.update(s.tobytes())
         gid = f"mesh:{i}"
-        out[gid] = Geometry(gid, pos, idx, sets, names[m.material_index] if m.material_index < len(names) else "", h.hexdigest())
+        out[gid] = Geometry(gid, pos, idx, sets, names[m.material_index] if m.material_index < len(names) else "", h.hexdigest(),
+                            tuple(uv_range(s, idx, pos) for s in sets))
     return out, skipped
 
 
@@ -237,7 +337,7 @@ def _objects(raw, geometries) -> list[SceneObject]:
             sets = min(len(g.uv_sets) for g in geos)
             tris = sum(g.triangles for g in geos)
             issue = None if sets else "no UVs"
-            outside = any(_outside(s) for g in geos for s in g.uv_sets[:1])
+            outside = any(r.outside for g in geos for r in g.uv_ranges[:1])
             h = hashlib.sha256()
             for g in geos:
                 h.update(g.fingerprint.encode())
@@ -260,9 +360,6 @@ def _objects(raw, geometries) -> list[SceneObject]:
         walk(c, root_m, [], (), seen)
     return out
 
-
-def _outside(uv: array, eps=1e-6) -> bool:
-    return bool(uv) and (min(uv) < -eps or max(uv) > 1 + eps)
 
 
 def _bounds(objects, geometries):

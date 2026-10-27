@@ -1,7 +1,8 @@
 """Mapping against real libmpv in a real window: what is drawn on the generated stage (transforms,
 orientation, instances, UV sets, neutral grey outside UV 0-1 and on unassigned objects) from
 the metres FBX, the centimetre Z-up FBX and the OBJ; exact frames in the video texture while
-the camera moves and the timeline is scrubbed, at 25, 24000/1001 and 30000/1001; and switching
+the camera moves and the timeline is scrubbed; UVs within UV_EDGE of the image's edge (no grey
+fringe) and beyond it (grey), at 25, 24000/1001 and 30000/1001; and switching
 between QC and Mapping with a seek pending. Needs libmpv, ffmpeg, assimp-py and a display:
     NITPIX_LIVE_PLAYER=1 .venv/bin/python -m unittest tests.test_mapping_live -v
 Pixel readback here is verification only; the view never reads frames back.
@@ -175,6 +176,41 @@ class Drawn(unittest.TestCase):
                     v.set_assignments({**{key(k): 0 for k in shows}, key("Centre"): 1})
                     pump(0.2)
                     self.assertTrue(like(self.pixel(v, v.grabFramebuffer(), p), RED))          # UV 2: PixelMap -> the red corner
+
+    def test_uv_edge_noise_shows_media_and_real_overshoot_stays_neutral(self):
+        """uvedge.fbx with the corners clip. Close up (1 cm from the surface, about 10 µm a pixel),
+        a UV overshoot within UV_EDGE shows the picture's edge, not a grey fringe; beyond it, grey."""
+        RED, GREEN, BLUE = (255, 0, 0), (0, 255, 0), (0, 0, 255)
+        like = lambda got, want: all(abs(a - b) <= 60 for a, b in zip(got, want))
+        grey = lambda c: max(c) - min(c) <= 12 and 25 <= c[0] <= 150
+        sc = load_scene(os.path.join(FIX, "uvedge.fbx"))
+        v = self.make()
+        v.set_scene(sc)
+        v.set_assignments({o.key: 0 for o in sc.objects})
+        self.load(v, self.corners, 10)
+        img = v.grabFramebuffer()
+        at = lambda k, u, vv: self.pixel(v, img, point_at_uv(sc, k, u, vv))
+        for k in ("Noise", "Beyond", "Islands"):                               # authored positions unchanged
+            self.assertTrue(like(at(k, 0.06, 0.9), RED), (k, at(k, 0.06, 0.9)))
+            self.assertTrue(like(at(k, 0.94, 0.9), GREEN), (k, at(k, 0.94, 0.9)))
+            self.assertTrue(like(at(k, 0.06, 0.1), BLUE), (k, at(k, 0.06, 0.1)))
+        self.assertTrue(grey(at("Islands", 1.45, 0.5)), at("Islands", 1.45, 0.5))         # islands beyond the image
+        self.assertTrue(grey(at("Islands", -0.55, 0.5)), at("Islands", -0.55, 0.5))
+
+        def close(k, u, vv):
+            p = point_at_uv(sc, k, u, vv)
+            v.cam_target, v.yaw, v.pitch, v.dist = QVector3D(*p), 0.0, 0.0, 0.01
+            v._camera_changed()
+            pump(0.15)
+            return self.pixel(v, v.grabFramebuffer(), p)
+
+        for u, vv, want in ((-4e-5, 0.9, RED), (1 + 4e-5, 0.9, GREEN), (0.03, -4e-5, BLUE)):  # Noise: within 8e-5 of the edge
+            c = close("Noise", u, vv)
+            self.assertTrue(like(c, want), ("Noise", u, vv, c))
+        c = close("Beyond", -2.5e-4, 0.9)                                      # Beyond: past UV_EDGE...
+        self.assertTrue(grey(c), c)
+        c = close("Beyond", 2.5e-4, 0.9)                                       # ...and just inside the image
+        self.assertTrue(like(c, RED), c)
 
     def test_exact_frames_in_the_texture_while_navigating_and_scrubbing(self):
         sc = load_scene(os.path.join(FIX, "stage.fbx"))

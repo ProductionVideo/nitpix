@@ -153,7 +153,7 @@ for o in scene.objects:
         "slots": [m.name for m in me.materials],
         "uv_sets": len(me.uv_layers),
         "mesh": me.name,
-        "outside_0_1": any(not (-1e-6 <= c <= 1 + 1e-6) for uv in uvs for c in uv),
+        "outside_0_1": any(not (-1e-4 <= c <= 1 + 1e-4) for uv in uvs for c in uv),   # UV_EDGE
         "corners": sets,           # per UV set: distinct (x, y, z, u, v); x y z in metres, Y up, to 1e-4
         "bounds": [[round(min(getattr(p, a) for p in pts), 4) for a in "xyz"],
                    [round(max(getattr(p, a) for p in pts), 4) for a in "xyz"]],

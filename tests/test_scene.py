@@ -6,6 +6,7 @@ script's own scene data, not from the importer under test. Skipped without assim
 """
 import importlib.util
 import json
+from array import array
 import os
 import tempfile
 import threading
@@ -16,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures", "scenes")
 HAVE = importlib.util.find_spec("assimp_py") is not None
 if HAVE:
-    from nitpix.scene import SceneImportError, load_scene
+    from nitpix.scene import UV_EDGE, SceneImportError, load_scene
 
 
 def fx(name):
@@ -222,6 +223,55 @@ class BadInput(unittest.TestCase):
                 fh.write("o Nothing\nv 0 0 0\nv 1 0 0\n")
             with self.assertRaises(SceneImportError):
                 load_scene(p)
+
+
+@unittest.skipUnless(HAVE, "needs assimp-py")
+class UVEdge(unittest.TestCase):
+    """uvedge.fbx (tools/scenes/make_uv_fixtures.py): where UVs fall, measured on triangles."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.s = load_scene(fx("uvedge.fbx"))
+
+    def r(self, key, uv_set=0):
+        o = self.s.object(key)
+        return [self.s.geometries[g].uv_ranges[uv_set] for g in o.geometries][0]
+
+    def test_ranges_and_the_surface_that_shows_neutral(self):
+        e = 1e-6                                                       # float32 in the file
+        for key, uv_set, u, v, outside, neutral in (
+                ("Noise", 0, (-8e-5, 1 + 8e-5), (-8e-5, 1 + 8e-5), 0, 0.0),            # export noise: on the image
+                ("Beyond", 0, (-4e-4, 1 + 4e-4), (-4e-4, 1 + 4e-4), 8, 1 - (1.0002 / 1.0008) ** 2),
+                ("Islands", 0, (-0.8, 1.7), (0.0, 1.0), 4, 0.5),                       # two of four quads
+                ("Tiles", 0, (-1.69, 2.74), (-0.475, 1.476), 8, 1 - 1 / (4.43 * 1.951)),
+                ("Sets", 0, (0.0, 4.0), (0.0, 2.0), 8, 1 - 1 / 8),                     # tiled 0-4 x 0-2
+                ("Sets", 1, (0.0, 1.0), (0.0, 1.0), 0, 0.0)):                          # its "Fit" set
+            with self.subTest(key, uv_set=uv_set):
+                r = self.r(key, uv_set)
+                self.assertTrue(all(abs(a - b) < e for a, b in zip(r.u + r.v, u + v)), (r.u, r.v))
+                self.assertEqual((r.outside, r.triangles), (outside, 8))
+                self.assertAlmostEqual(r.neutral_share, neutral, places=4)
+        self.assertFalse(self.s.object("Noise").outside_0_1)
+        self.assertTrue(self.s.object("Beyond").outside_0_1)
+        self.assertAlmostEqual(self.r("Tiles").overshoot, 1.74, places=5)
+
+    def test_the_tolerance_is_small(self):
+        self.assertLess(UV_EDGE, 0.5 / 3840)                           # under half a texel of the largest preview
+
+    def test_unused_vertices_cover_nothing(self):
+        from nitpix.scene import uv_range
+        uv = array("f", [0, 0, 1, 0, 1, 1, 7.5, -3.0])                 # vertex 3 is used by no triangle
+        pos = array("f", [0, 0, 0, 1, 0, 0, 1, 1, 0, 9, 9, 9])
+        r = uv_range(uv, array("I", [0, 1, 2]), pos)
+        self.assertEqual((r.u, r.v, r.outside, r.neutral_share), ((0.0, 1.0), (0.0, 1.0), 0, 0.0))
+
+    def test_partly_outside_triangle_is_clipped_exactly(self):
+        from nitpix.scene import uv_range
+        uv = array("f", [0, 0, 2, 0, 0, 1])                            # half of it (by area) lies beyond U 1
+        pos = array("f", [0, 0, 0, 2, 0, 0, 0, 1, 0])
+        r = uv_range(uv, array("I", [0, 1, 2]), pos)
+        self.assertEqual(r.outside, 1)
+        self.assertAlmostEqual(r.neutral_share, 0.25, places=3)       # the corner beyond U 1: (1/2)² of it
 
 
 @unittest.skipUnless(HAVE and os.environ.get("NITPIX_SLOW") == "1", "set NITPIX_SLOW=1 (and have assimp-py)")

@@ -10,8 +10,9 @@ generations, decoder safeguards, rational frame maths, shutdown) with only the d
   not available the view renders the way the QC player does and says why.
 - Camera movement only repaints: no seek, decode, libmpv render or geometry upload. Geometry is
   uploaded once per scene, one set of buffers per mesh, shared by its instances.
-- Unlit: a media surface shows the texture's values. Where the chosen UVs fall outside 0-1, and
-  on objects with no media, the surface is neutral grey with a simple headlight so the shape reads.
+- Unlit: a media surface shows the texture's values. Where the chosen UVs fall outside 0-1 (by
+  more than UV_EDGE, nitpix/scene.py: within it the image's edge is sampled), and on objects
+  with no media, the surface is neutral grey with a simple headlight so the shape reads.
   Faces seen from behind are darker and never show media. Alpha is premultiplied and shown over
   the surface's grey. Mipmapped, anisotropic sampling for surfaces seen at an angle.
 
@@ -28,6 +29,7 @@ from PySide6.QtGui import QColor, QImage, QMatrix4x4, QVector3D
 from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat, QOpenGLShader,
                               QOpenGLShaderProgram, QOpenGLTexture, QOpenGLVertexArrayObject)
 
+from ..scene import UV_EDGE
 from .mpvrender import FrameClock, IndexedDraw
 from .mpvwidget import MpvWidget
 
@@ -60,6 +62,7 @@ uniform int media;        // 1: this object shows the media
 uniform int video;        // 1: a frame has been drawn into the texture
 uniform vec3 eye;
 uniform float selected;
+uniform float edge;       // UV_EDGE: export noise beyond 0-1 still samples the image's edge
 out vec4 frag;
 void main() {
     vec3 n = normalize(cross(dFdx(v_world), dFdy(v_world)));
@@ -69,8 +72,8 @@ void main() {
     if (!gl_FrontFacing) {
         c = grey * 0.55;                                   // seen from behind: never media
     } else if (media == 1 && video == 1
-               && v_uv.x >= 0.0 && v_uv.x <= 1.0 && v_uv.y >= 0.0 && v_uv.y <= 1.0) {
-        vec4 t = texture(tex, v_uv);                       // premultiplied alpha
+               && all(greaterThanEqual(v_uv, vec2(-edge))) && all(lessThanEqual(v_uv, vec2(1.0 + edge)))) {
+        vec4 t = texture(tex, clamp(v_uv, 0.0, 1.0));     // premultiplied alpha
         c = t.rgb + grey * (1.0 - t.a);
     }
     c = mix(c, vec3(0.25, 0.55, 1.0), selected * 0.22);
@@ -358,6 +361,7 @@ class MappingView(MpvWidget):
             self.prog.bind()
             self.prog.setUniformValue("tex", 0)
             self.prog.setUniformValue("eye", eye)
+            self.prog.setUniformValue1f("edge", UV_EDGE)
             self.prog.setUniformValue("video", 1 if (self.fbo is not None and self.has_frame and self.loaded) else 0)
             f.glActiveTexture(GL_TEXTURE0)
             f.glBindTexture(GL_TEXTURE_2D, self.fbo.texture() if self.fbo is not None else self._blank.textureId())

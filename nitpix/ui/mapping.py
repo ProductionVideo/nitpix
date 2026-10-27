@@ -352,8 +352,6 @@ class MappingScreen(QWidget):
                 parent = items[k]
             it = QTreeWidgetItem([o.display, "", ""])
             it.setData(0, KEY, o.key)
-            it.setToolTip(0, f"{o.key}\n{o.triangles:,} triangles · {len(o.slots)} material slot(s): {', '.join(o.slots)}\n"
-                             f"{o.uv_sets} UV set(s)")
             (parent.addChild(it) if parent else self.tree.addTopLevelItem(it))
             items[o.key] = it
         self.tree.expandAll()
@@ -378,8 +376,13 @@ class MappingScreen(QWidget):
             uv = self.assign.uv.get(k)
             it.setText(1, f"● UV {uv + 1}" if uv is not None else "")
             w = self.assign.warning(k)
-            it.setText(2, w or "")
+            it.setText(2, w or ("no UVs: stays neutral" if not self.assign.eligible(k) else ""))
             it.setForeground(2, theme.colour("warn" if w else "muted"))
+            o = self.assign.object(k)
+            tip = (f"{o.key}\n{o.triangles:,} triangles · {len(o.slots)} material slot(s): {', '.join(o.slots)}\n"
+                   f"{self.assign.details(k)}")
+            for c in range(3):
+                it.setToolTip(c, tip)
 
     def selected_keys(self) -> list[str]:
         return [it.data(0, KEY) for it in self.tree.selectedItems() if it.data(0, KEY)]

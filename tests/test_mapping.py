@@ -65,7 +65,8 @@ class Rules(unittest.TestCase):
 
     def test_objects_without_uvs_are_refused_not_given_coordinates(self):
         self.assertEqual(self.a.apply(["Stage/Truss"]), {"Stage/Truss": "no UVs"})
-        self.assertEqual(self.a.warning("Stage/Truss"), "no UVs: stays neutral")
+        self.assertIsNone(self.a.warning("Stage/Truss"))                    # nothing assigned, nothing to warn about
+        self.assertIn("No UVs", self.a.details("Stage/Truss"))
 
     def test_uv_sets_and_mixed_selections(self):
         a = self.a
@@ -84,10 +85,59 @@ class Rules(unittest.TestCase):
     def test_out_of_range_follows_the_chosen_uv_set(self):
         a = self.a
         self.assertTrue(a.outside("Stage/Spill"))                            # authored -0.1..1.1
-        self.assertEqual(a.warning("Stage/Spill"), "UVs outside the image: neutral there")
+        self.assertIsNone(a.warning("Stage/Spill"))                          # unassigned: details only
+        self.assertIn("U -0.1 to 1.1", a.details("Stage/Spill"))
+        a.apply(["Stage/Spill"])
+        self.assertEqual(a.warning("Stage/Spill"), "partly outside image (31% neutral)")   # 1 - (1/1.2)², not every triangle
         self.assertFalse(a.outside("Stage/Screens/Centre", 0))
         self.assertFalse(a.outside("Stage/Screens/Centre", 1))
         self.assertFalse(a.outside("Stage/Truss"))
+
+
+@unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
+class UVWarnings(unittest.TestCase):
+    """uvedge.fbx: warnings follow assignment and the UV set in use; export noise is no warning."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scene = load_scene(os.path.join(FIX, "uvedge.fbx"))
+
+    def setUp(self):
+        self.a = Assignments(self.scene)
+
+    def test_noise_at_the_edge_is_on_the_image(self):
+        self.a.apply(["Noise"])
+        self.assertFalse(self.a.outside("Noise"))
+        self.assertIsNone(self.a.warning("Noise"))
+
+    def test_assigned_objects_are_warned_with_the_share_shown_neutral(self):
+        a = self.a
+        a.apply(["Beyond", "Islands", "Tiles"])
+        self.assertEqual(a.warning("Beyond"), "partly outside image (<1% neutral)")
+        self.assertEqual(a.warning("Islands"), "partly outside image (50% neutral)")
+        self.assertEqual(a.warning("Tiles"), "partly outside image (88% neutral)")
+        d = a.details("Islands")
+        self.assertIn("U -0.8 to 1.7", d)
+        self.assertIn("up to 0.8 beyond the image", d)
+        self.assertIn("4 of 8 triangles", d)
+
+    def test_unassigned_tiled_object_is_not_a_problem(self):
+        self.assertTrue(self.a.outside("Tiles"))
+        self.assertIsNone(self.a.warning("Tiles"))
+        self.assertIn("U -1.69 to 2.74", self.a.details("Tiles"))
+
+    def test_the_uv_set_in_use_decides(self):
+        a = self.a
+        a.apply(["Sets"], 0)
+        self.assertEqual(a.warning("Sets"), "partly outside image (87% neutral)")      # tiled 0-4 x 0-2: 7/8
+        a.apply(["Sets"], 1)
+        self.assertIsNone(a.warning("Sets"))                                           # "Fit" is all on the image
+        self.assertTrue(a.outside("Sets", 0))                                          # the other set is still described
+        self.assertIn("all on the image", a.details("Sets"))
+
+    def test_shares_never_round_to_none_or_all(self):
+        from nitpix.mapping import share
+        self.assertEqual([share(x) for x in (0, 0.001, 0.5, 0.996, 1)], ["0%", "<1%", "50%", ">99%", "100%"])
 
 
 @unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
@@ -140,7 +190,8 @@ class Workspace(unittest.TestCase):
         rows = {it.data(0, 0x0100): it for it in ms._rows()}
         self.assertEqual(rows["Stage/Logo_A#2"].text(0), "Logo_A (2)")       # duplicates told apart
         self.assertEqual(rows["Stage/Truss"].text(2), "no UVs: stays neutral")
-        self.assertEqual(rows["Stage/Spill"].text(2), "UVs outside the image: neutral there")
+        self.assertEqual(rows["Stage/Spill"].text(2), "")                    # unassigned: no warning...
+        self.assertIn("U -0.1 to 1.1", rows["Stage/Spill"].toolTip(0))       # ...the numbers in its tooltip
         ms.select(["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"])
         self.assertTrue(ms.apply_btn.isEnabled())
         ms.apply_selected()

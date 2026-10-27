@@ -90,7 +90,8 @@ To use it:
 Rules for this alpha:
 
 - **Assignment is per object,** including all of its material slots. A stage exported as one object with screens as material slots must be split into objects before export.
-- **Outside UV 0–1 is always neutral grey.** Objects without UVs stay grey and are never given generated coordinates. The list warns about both cases, for the UV set chosen.
+- **Outside UV 0–1 is always neutral grey.** UVs are used as authored: they are never normalised, rescaled or wrapped. Only export noise within 0.0001 of the edge counts as on the image, which is under half a texel of the largest preview, so it never leaves a grey fringe. Objects without UVs stay grey and are never given generated coordinates.
+- **Warnings are for assigned objects.** An assigned object is flagged with the share of its surface that shows neutral in the UV set it uses. Every object's exact UV ranges are in its tooltip, assigned or not. Many stage models have UVs made for a repeating material rather than for media: most of such a surface stays grey, and choosing another UV set (where the model has one) is the fix, not a setting here.
 - **Faces seen from behind are dark grey** and never show media.
 - **Preview resolution:** media over 3840 px on the long side is downscaled for this spatial preview; QC still plays it at full size.
 - **Colours are display-referred:** the same picture as the QC player, but unlit and shown as an 8-bit preview. This is not an LED processor simulation.
