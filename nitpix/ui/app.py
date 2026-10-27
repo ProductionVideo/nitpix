@@ -1204,6 +1204,84 @@ class MainWindow(QMainWindow):
         super().closeEvent(ev)
 
 
+def _restore_check(app, win, shot: str):
+    """Verification of packaged builds: open Mapping on a project that has a saved setup (for example a
+    copy whose original model files are gone) and check what comes back, then that it plays, scrubs
+    and hands over to QC at the exact frame and back. PASS/FAIL per step, like _mapping_check."""
+    import time as _time
+    base = os.path.splitext(shot)[0]
+    results, errors = [], []
+    win.review.player.error.connect(errors.append)
+    saved = win.session.project.get_meta("mapping.setup") or {}
+
+    def ms():
+        return win.mapping
+
+    def loaded_players():
+        return [n for n, p in (("QC", win.review.player), ("Mapping", ms().view if ms() else None)) if p is not None and p.m is not None and p.m.path]
+
+    def check(name, ok, detail=""):
+        one = len(loaded_players()) <= 1
+        results.append(("PASS" if ok and one else "FAIL", name, f"{detail}{'' if one else ' TWO PLAYERS LOADED'}"))
+
+    steps = []
+
+    def add(fn, wait=800):
+        steps.append((fn, wait))
+
+    def s_open():
+        win.nav["mapping"].click()
+        ms().view.error.connect(errors.append)
+    add(s_open, 300)
+
+    def s_wait(limit=[400]):
+        if (ms()._batch is not None or not ms().view.loaded) and limit[0] > 0:
+            limit[0] -= 1
+            return QTimer.singleShot(100, s_wait)
+        m = ms()
+        want_ids = [x["id"] for x in saved.get("sources", [])]
+        check("Saved setup restored from the project's own model copies",
+              [x.id for x in m.stage.sources] == want_ids and not m.missing and m.assign is not None
+              and dict(m.assign.uv) == saved.get("assignments") and all(os.path.realpath(x.path).startswith(os.path.realpath(str(win.session.project.folder)))
+                                                                      for x in m.stage.sources),
+              f"{m.scene_lab.text()}; {len(saved.get('assignments', {}))} assignments; missing {sorted(m.missing)}")
+        check("Projector, tab and clip restored", (m.projector is not None) == bool(saved.get("projectors"))
+              and m.tabs.currentIndex() == ("surfaces", "projectors").index(saved.get("tab", "surfaces"))
+              and (m.asset["id"] if m.asset else None) == saved.get("clip"), m.asset["name"] if m.asset else "no clip")
+        win.grab().save(f"{base}-restored.png")
+        m.playhead.seek(0)
+    add(s_wait, 1500)
+    add(lambda: ms().toggle_play(), 1200)
+    add(lambda: check("Plays after restore", not ms().view.paused and ms().view.frame > 5, f"frame {ms().view.frame}"), 10)
+    add(lambda: (ms().toggle_play(), ms().playhead.scrub(57)), 800)
+    add(lambda: ms().playhead.step(1), 600)
+    add(lambda: check("Scrub to 57, step: frame 58", ms().playhead.frame == ms().view.frame == 58, f"frame {ms().view.frame}"), 10)
+    add(lambda: win.show_view("review"), 1500)
+    add(lambda: check("To QC at the same clip and frame", win.review.asset["id"] == ms().asset["id"] and win.review.frame == 58,
+                      f"QC {win.review.frame}"), 10)
+    add(lambda: win.show_view("mapping"), 1500)
+    add(lambda: check("Back to Mapping, setup kept", ms().playhead.frame == 58 and len(ms().stage.sources) == len(saved.get("sources", []))), 10)
+
+    def s_quit():
+        t = _time.monotonic()
+        win.close()
+        results.append(("PASS" if _time.monotonic() - t < 3 else "FAIL", "Window closed", f"{_time.monotonic() - t:.2f} s"))
+        results.append(("PASS" if not errors else "FAIL", "No player errors", repr(errors[:3])))
+        print("\n".join(f"restore check: {r} | {n} | {d}" for r, n, d in results), flush=True)
+        app.quit()
+    add(s_quit, 0)
+
+    def run(i=0):
+        fn, wait = steps[i]
+        try:
+            fn()
+        except Exception as e:
+            results.append(("FAIL", f"step {i}", repr(e)))
+        if i + 1 < len(steps):
+            QTimer.singleShot(wait, lambda: run(i + 1))
+    QTimer.singleShot(1500, run)
+
+
 def _mapping_check(app, win, stage: str, shot: str):
     """Verification of packaged builds: the Mapping journey, step by step, each logged PASS/FAIL.
     Needs a project with two visual clips. Keys are real key events through the window's routing
@@ -1512,7 +1590,9 @@ def run(project: str | None = None) -> int:
         aid = os.environ.get("NITPIX_SCREENSHOT_ASSET")
         if aid and win.session.project:
             QTimer.singleShot(1500, lambda: win.show_asset(int(aid)))
-        if os.environ.get("NITPIX_SCREENSHOT_STAGE") and win.session.project:
+        if os.environ.get("NITPIX_SCREENSHOT_RESTORE") and win.session.project:
+            _restore_check(app, win, shot)
+        elif os.environ.get("NITPIX_SCREENSHOT_STAGE") and win.session.project:
             _mapping_check(app, win, os.environ["NITPIX_SCREENSHOT_STAGE"], shot)
         else:
             QTimer.singleShot(int(os.environ.get("NITPIX_SCREENSHOT_DELAY", "7000")), lambda: (win.grab().save(shot), app.quit()))
