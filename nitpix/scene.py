@@ -28,6 +28,7 @@ import tempfile
 import threading
 from array import array
 from dataclasses import dataclass, field
+from functools import cached_property
 from importlib import metadata
 from types import SimpleNamespace
 
@@ -183,7 +184,11 @@ class NormalizedScene:
     warnings: tuple = field(default=())
 
     def object(self, key: str) -> SceneObject | None:
-        return next((o for o in self.objects if o.key == key), None)
+        return self._by_key.get(key)
+
+    @cached_property
+    def _by_key(self) -> dict:          # built once: the object list asks for every row (135k-object stages exist)
+        return {o.key: o for o in self.objects}
 
 
 def importer_version() -> str:

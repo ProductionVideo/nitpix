@@ -10,7 +10,7 @@ app runs and are not saved with the project.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QSplitter, QStackedWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -191,11 +191,14 @@ class MappingScreen(QWidget):
         self.tree.setHeaderLabels(["Object", "Media"])
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setIndentation(14)
+        self.tree.setUniformRowHeights(True)          # one height for every row: no per-row measuring
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)      # "Floor_…_07_Rev3", not "Floor_Inlay_LED_Pan…"
         self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tree.header().setStretchLastSection(False)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)   # sized once: to-contents re-measured
+        widest = max(self.tree.fontMetrics().horizontalAdvance(t) for t in ("● UV 8 ⚠", "no UVs", "Media"))   # every row on each change
+        self.tree.header().resizeSection(1, widest + 28)
         self.tree.itemSelectionChanged.connect(self._on_selection)
         self.objects.addWidget(self.tree)
         rlay.addWidget(self.objects, 1)
@@ -466,14 +469,21 @@ class MappingScreen(QWidget):
         return out
 
     def _refresh_rows(self):
+        """Media column, colour and tooltip per object row; only rows that change are touched
+        (each change makes the view re-measure, which added up to minutes on big stages)."""
         if not self.assign:
             return
+        colours = {k: theme.colour(k) for k in ("warn", "muted", "ink")}
         for it in self._rows():
             k = it.data(0, KEY)
             uv = self.assign.uv.get(k)
             w = self.assign.warning(k)
-            it.setText(1, "no UVs" if not self.assign.eligible(k) else f"● UV {uv + 1}" + (" ⚠" if w else "") if uv is not None else "")
-            it.setForeground(1, theme.colour("warn" if w else "muted" if uv is None else "ink"))
+            text = "no UVs" if not self.assign.eligible(k) else f"● UV {uv + 1}" + (" ⚠" if w else "") if uv is not None else ""
+            if it.text(1) == text and it.data(1, KEY) is not None:
+                continue
+            it.setData(1, KEY, True)                  # filled once; afterwards only changes
+            it.setText(1, text)
+            it.setForeground(1, colours["warn" if w else "muted" if uv is None else "ink"])
             o = self.assign.object(k)
             tip = (f"{o.key}\n{o.triangles:,} triangles · {len(o.slots)} material slot(s): {', '.join(o.slots)}\n"
                    + (f"Shows the clip: {w}.\n" if w else "") + self.assign.details(k))
@@ -511,19 +521,35 @@ class MappingScreen(QWidget):
 
     def _selected_items(self):
         """Selected object rows, including any the filter hides (QTreeWidget.selectedItems() leaves those out)."""
-        items = (self.tree.itemFromIndex(i) for i in self.tree.selectionModel().selectedRows(0))
+        items = (self.tree.itemFromIndex(i) for i in self.tree.selectionModel().selectedIndexes() if i.column() == 0)   # selectedRows() is quadratic
         return [it for it in items if it is not None and it.data(0, KEY)]
 
     def selected_keys(self) -> list[str]:
         return [it.data(0, KEY) for it in self._selected_items()]
 
     def select(self, keys):
-        """Select objects by key (also used by tests and automation)."""
+        """Select objects by key (also used by tests and automation). One selection change, with
+        neighbouring rows as one range: row by row, a stage of 100k objects took minutes."""
         want = set(keys)
-        self.tree.clearSelection()
-        for it in self._rows():
-            if it.data(0, KEY) in want:
-                it.setSelected(True)
+        sel = QItemSelection()
+        model = self.tree.model()
+        last = self.tree.columnCount() - 1
+
+        def walk(parent):
+            run = None                                # (first, last) row of a run of wanted children
+            n = model.rowCount(parent)
+            for r in range(n + 1):
+                idx = model.index(r, 0, parent) if r < n else None
+                wanted = idx is not None and idx.data(KEY) in want
+                if wanted:
+                    run = (run[0], r) if run else (r, r)
+                elif run:
+                    sel.select(model.index(run[0], 0, parent), model.index(run[1], last, parent))
+                    run = None
+                if idx is not None and model.rowCount(idx):
+                    walk(idx)
+        walk(QModelIndex())
+        self.tree.selectionModel().select(sel, QItemSelectionModel.SelectionFlag.ClearAndSelect)
 
     def _on_selection(self):
         self._refresh_controls()

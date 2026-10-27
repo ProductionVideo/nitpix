@@ -215,6 +215,30 @@ class Workspace(unittest.TestCase):
         self.assertEqual((ms.objects.currentIndex(), ms.scene_lab.text()[:9]), (1, "stage.fbx"))
         self.assertEqual(list(ms.assign.uv), ["Stage/Floor"])
 
+    def test_a_stage_of_many_objects_lists_and_selects_quickly(self):
+        """20,000 objects (real show models reach 135,000). Finding objects by key and selecting
+        them row by row were both quadratic: minutes, and gigabytes, for a big stage."""
+        from array import array
+        from nitpix.scene import Geometry, NormalizedScene, SceneObject, uv_range
+        n = 20000
+        pos, idx, uv = array("f", [0, 0, 0, 1, 0, 0, 0, 1, 0]), array("I", [0, 1, 2]), array("f", [0, 0, 1, 0, 0, 1])
+        g = Geometry("mesh:0", pos, idx, (uv,), "Screen", "f", (uv_range(uv, idx, pos),))
+        world = tuple(float(i == j) for i in range(4) for j in range(4))
+        objs = tuple(SceneObject(f"Rig/Panel_{i:05d}", ("Rig", f"Panel_{i:05d}"), f"Panel_{i:05d}", ("mesh:0",), ("Screen",),
+                                 world, 1, 1, False, None, "f") for i in range(n))
+        scene = NormalizedScene({"path": "/generated"}, "test", objs, {"mesh:0": g}, ((0, 0, 0), (1, 1, 0)))
+        ms = self.ms
+        t = time.monotonic()
+        ms._set_scene(scene, "many.obj")
+        ms.select_shown()
+        ms.apply_selected()
+        ms.filter.setText("Panel_1999")
+        ms.select_shown()
+        took = time.monotonic() - t
+        self.assertEqual(len(ms.assign.uv), n)
+        self.assertEqual(sorted(ms.selected_keys()), [f"Rig/Panel_1999{d}" for d in range(10)])
+        self.assertLess(took, 20)                                           # was many minutes
+
     def test_filter_keeps_selection_and_assignments(self):
         ms = self.ms
         self.import_("stage.fbx")
