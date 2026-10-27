@@ -579,8 +579,10 @@ class MappingScreen(QWidget):
         return src
 
     def _replace_with(self, scenes):
-        """A new stage of these scenes (none: empty). Assignments and the filter start again."""
-        self.stage = Stage()
+        """A new stage of these scenes (none: empty). Assignments and the filter start again; source
+        ids carry on, so no id means two different files in one session."""
+        self.tree.clear()                             # rows (and the selection) go while their objects still exist
+        self.stage = Stage(next_id=self.stage.next_id)
         for sc in scenes:
             self.stage.add(sc)
         self.assign = Assignments(self.stage) if self.stage else None
@@ -592,14 +594,14 @@ class MappingScreen(QWidget):
 
     def remove_source(self, sid):
         """Take one model file, its objects and their assignments off the stage. The file is not touched."""
-        src = self.stage.remove(sid)
-        if src is None:
+        if self.stage.source(sid) is None:
             return
-        self.assign.prune()
-        for i in range(self.tree.topLevelItemCount()):
+        for i in range(self.tree.topLevelItemCount()):    # rows first: the selection changes while the objects still exist
             if self.tree.topLevelItem(i).data(0, SOURCE) == sid:
                 self.tree.takeTopLevelItem(i)
                 break
+        src = self.stage.remove(sid)
+        self.assign.prune()
         self.view.set_scene(self.stage if self.stage else None, frame=False)
         if not self.stage:
             self.assign = None

@@ -101,7 +101,8 @@ class Composed(unittest.TestCase):
         self.assertEqual(len(asg.uv), len([o for o in st.objects if o.uv_sets]))
         self.assertIsNone(st.remove(left.id))                  # already gone
         again = st.add(self.scenes["left.fbx"])
-        self.assertNotEqual(again.id, left.id)                 # ids are never reused
+        self.assertNotEqual(again.id, left.id)                 # ids are never reused...
+        self.assertEqual(Stage(next_id=st.next_id).add(self.scenes["left.fbx"]).id, f"m{st.next_id}")   # ...nor by a replacing stage
         for s in list(st.sources):
             st.remove(s.id)
         self.assertFalse(st)

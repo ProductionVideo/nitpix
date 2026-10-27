@@ -509,6 +509,11 @@ class Composition(_Screen):
 
     def test_removing_files_down_to_an_empty_stage(self):
         ms = self.ms
+        raised = []                                                          # an exception in a Qt slot only prints
+        hook = mock.patch("sys.excepthook", lambda *e: raised.append(e[1]))
+        hook.start()
+        self.addCleanup(lambda: self.assertEqual(raised, []))
+        self.addCleanup(hook.stop)
         self.import_(part("centre.obj"), part("left.fbx"), part("venue.obj"))
         ms.apply_all()
         ms.select(self.keys("left.fbx"))
@@ -550,6 +555,63 @@ class Composition(_Screen):
         ms.filter.clear()
         self.assertEqual(sorted(ms.assign.uv), sorted(shown))
         self.assertEqual(ms.all_btn.text(), "Apply to all 4 with UVs")
+
+    def test_replacing_while_filtered_with_one_selected(self):
+        """The new stage was put in before the old rows went: clearing the filter (or the rows)
+        then refreshed the inspector with a key of the old stage, an exception in a Qt slot."""
+        ms = self.ms
+        raised = []
+        with mock.patch("sys.excepthook", lambda *e: raised.append(e[1])):
+            self.import_(part("centre.obj"), part("left.fbx"))
+            ms.filter.setText("scr")
+            ms.select(self.keys("left.fbx"))
+            self.import_(part("venue.obj"), replace=True)
+        self.assertEqual(raised, [])
+        self.assertEqual((ms.filter.text(), ms.selected_keys()), ("", []))
+        self.assertEqual([s.id for s in ms.stage.sources], ["m3"])            # ids carry on: m1 stays centre.obj's
+
+    def test_random_edits_never_raise_in_the_inspector(self):
+        """A seeded mix of add / replace / cancel / remove / select / filter / apply. Replacing the stage
+        while one object was selected made the inspector look up an old key in the new stage
+        (an exception in a Qt slot: printed, not shown, so only a hook catches it)."""
+        import random
+        from nitpix.ui.mapping import KEY
+        raised = []
+        with mock.patch("sys.excepthook", lambda *e: raised.append(e[1])):
+            files = [part(n) for n in ("centre.obj", "left.fbx", "venue.obj", "a/screen.obj")] + [os.path.join(FIX, "garbage.fbx")]
+            ms = self.ms
+            for seed in (2, 4):
+                r = random.Random(seed)
+                ms.reset_project()
+                for _ in range(60):
+                    rows = ms._rows()
+                    op = r.choice(["add", "add", "replace", "cancel", "remove", "one", "some", "file", "filter", "apply", "clear"])
+                    if op in ("add", "replace"):
+                        (ms.add_models if op == "add" else ms.replace_stage)(r.sample(files, r.randint(1, 2)))
+                        if r.random() < 0.7:
+                            self.wait()
+                    elif op == "cancel":
+                        ms.cancel_import()
+                    elif op == "remove" and ms.stage.sources:
+                        ms.remove_source(r.choice(ms.stage.sources).id)
+                    elif op == "one" and rows:
+                        ms.tree.setCurrentItem(r.choice(rows))
+                    elif op == "some" and rows:
+                        ms.select([it.data(0, KEY) for it in r.sample(rows, min(3, len(rows)))])
+                    elif op == "file" and ms.tree.topLevelItemCount():
+                        ms._on_row_clicked(ms.tree.topLevelItem(r.randrange(ms.tree.topLevelItemCount())), 0)
+                    elif op == "filter":
+                        ms.filter.setText(r.choice(["", "scr", "floor"]))
+                    elif op == "apply":
+                        ms.apply_selected()
+                    elif op == "clear":
+                        ms.clear_selected()
+                    pump(self.app, timeout=0.01)
+                self.wait()
+                ids = [s.id for s in ms.stage.sources]
+                self.assertEqual(len(ids), len(set(ids)))
+                self.assertTrue(all(ms.stage.object(k) for k in ms.selected_keys()))
+        self.assertEqual(raised, [])
 
     def test_many_objects_in_several_files_stay_quick(self):
         """Four files of 5,000 objects: adding each, selecting all, applying, filtering and removing

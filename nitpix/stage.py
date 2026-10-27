@@ -3,8 +3,8 @@ Mapping screen adds and removes sources, nitpix/mapping.py assigns its objects a
 draws it, through the same questions a single NormalizedScene answers (objects, object(key),
 geometries, bounds).
 
-- Every import is a Source with its own session id ("m1", "m2", ... never reused within a
-  stage's lifetime), so the same file name, path or object key in two sources cannot collide.
+- Every import is a Source with its own session id ("m1", "m2", ... never reused: a stage that
+  replaces another continues its numbering, Stage(next_id=old.next_id)), so the same file name, path or object key in two sources cannot collide.
 - Stage keys are "<source id>:<object key in its file>"; geometry ids are prefixed the same way.
   Neither display names nor list positions are identities.
 - Objects keep their imported coordinates (metres, Y up, the file's own placement): nothing is
@@ -52,12 +52,12 @@ class Source:
 
 
 class Stage:
-    def __init__(self):
+    def __init__(self, next_id: int = 1):
         self.sources: list[Source] = []
         self.objects: tuple = ()
         self.geometries: dict = {}
         self._by_key: dict = {}
-        self._next = 1
+        self.next_id = next_id
 
     def __bool__(self):
         return bool(self.sources)
@@ -101,8 +101,8 @@ class Stage:
 
     # ---- changes ------------------------------------------------------------------------
     def add(self, scene: NormalizedScene) -> Source:
-        sid = f"m{self._next}"
-        self._next += 1
+        sid = f"m{self.next_id}"
+        self.next_id += 1
         objs = tuple(dataclasses.replace(o, key=stage_key(sid, o.key), geometries=tuple(stage_key(sid, g) for g in o.geometries))
                      for o in scene.objects)
         src = Source(sid, scene, objs)
