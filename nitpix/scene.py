@@ -14,8 +14,9 @@ mesh(es). Keys are node paths below the file's root, not display names, so two o
 "Logo" stay apart ("Stage/Logo" and "Stage/Logo#2"). Assimp's FBX pivot helper nodes
 ("…_$AssimpFbx$_Translation") are folded into the node they belong to.
 
-Known importer limits (assimp-py 1.2): a file with any line or point geometry (splines, guides)
-is refused as a whole, because the binding rejects non-triangle faces before nitpix sees them;
+Known importer limits (assimp-py 1.2): the binding rejects a whole file with any line or point
+geometry (splines, guides, SketchUp edges) before nitpix sees it. For OBJ, nitpix then reads a
+temporary copy without those statements (the source is untouched); an FBX is refused;
 UV set names and the file's declared units are not exposed (UV sets are numbered; units are
 applied, not reported); OBJ objects that share a name are merged into one by Assimp's OBJ reader.
 """
@@ -23,9 +24,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 import threading
 from array import array
 from dataclasses import dataclass, field
+from functools import cached_property
 from importlib import metadata
 from types import SimpleNamespace
 
@@ -37,8 +40,8 @@ _HELPER = "_$AssimpFbx$_"
 # shift is never visible; exporters that round UVs to four decimals are off by up to 5e-5. One
 # value for the import diagnostics, nitpix/mapping.py and the view's shader.
 UV_EDGE = 1e-4
-LINES_MESSAGE = ("This file has lines or points (splines, guides) as well as surfaces, and the importer "
-                 "cannot skip them yet. Export the surfaces only and import again.")
+LINES_MESSAGE = ("This FBX has lines or points (splines, guides) as well as surfaces, and the importer "
+                 "cannot skip them in FBX. Export the surfaces only (or as OBJ) and import again.")
 
 
 class SceneImportError(Exception):
@@ -181,7 +184,11 @@ class NormalizedScene:
     warnings: tuple = field(default=())
 
     def object(self, key: str) -> SceneObject | None:
-        return next((o for o in self.objects if o.key == key), None)
+        return self._by_key.get(key)
+
+    @cached_property
+    def _by_key(self) -> dict:          # built once: the object list asks for every row (135k-object stages exist)
+        return {o.key: o for o in self.objects}
 
 
 def importer_version() -> str:
@@ -214,24 +221,26 @@ def load_scene(path: str, cancel: threading.Event | None = None) -> NormalizedSc
         st = os.stat(path)
     except OSError:
         raise SceneImportError(f"File not found: {path}") from None
+    if st.st_size == 0:
+        raise SceneImportError("This file is empty (0 bytes).")
     try:
         import assimp_py as ai
     except ImportError:
         raise SceneImportError("The scene importer (assimp-py) is not installed.") from None
     flags = (ai.Process_Triangulate | ai.Process_SortByPType | ai.Process_JoinIdenticalVertices
              | ai.Process_GlobalScale | ai.Process_ValidateDataStructure)
-    try:
-        raw = ai.import_file(path, flags)
-    except FileNotFoundError:
-        raise SceneImportError(f"File not found: {path}") from None
-    except ValueError as e:     # assimp-py 1.2 refuses a whole file if any mesh is lines or points
-        if "triangulated" in str(e):
-            raise SceneImportError(LINES_MESSAGE) from None
-        raise SceneImportError(f"Could not read this scene: {e}") from None
-    except Exception as e:      # Assimp reports damaged or unsupported files as RuntimeError
-        raise SceneImportError(f"Could not read this scene: {_assimp_message(e, path)}") from None
-    _check(cancel)
     warnings = []
+    with tempfile.TemporaryDirectory(prefix="nitpix obj ") as tmp:
+        try:
+            raw = _import(ai, path, flags)
+        except _LinesOrPoints:
+            if not path.lower().endswith(".obj"):
+                raise SceneImportError(LINES_MESSAGE) from None
+            _check(cancel)
+            surfaces, dropped = _obj_surfaces(path, tmp)
+            raw = _import(ai, surfaces, flags, shown=path)
+            warnings.append(f"{dropped:,} line or point element{'s' if dropped > 1 else ''} ignored (only surfaces can show media).")
+    _check(cancel)
     geometries, skipped = _geometries(raw, cancel)
     if skipped:
         warnings.append(f"{skipped} point or line mesh{'es' if skipped > 1 else ''} ignored (only surfaces can show media).")
@@ -256,10 +265,71 @@ def _check(cancel):
         raise SceneImportError("Import cancelled.")
 
 
-def _assimp_message(e: Exception, path: str) -> str:
+class _LinesOrPoints(Exception):
+    pass
+
+
+def _import(ai, path, flags, shown=None):
+    shown = shown or path
+    try:
+        return ai.import_file(path, flags)
+    except FileNotFoundError:
+        raise SceneImportError(f"File not found: {shown}") from None
+    except ValueError as e:     # assimp-py 1.2 refuses a whole file if any mesh is lines or points
+        if "triangulated" in str(e):
+            raise _LinesOrPoints() from None
+        raise SceneImportError(f"Could not read this scene: {e}") from None
+    except Exception as e:      # Assimp reports damaged or unsupported files as RuntimeError
+        raise SceneImportError(f"Could not read this scene: {_assimp_message(e, path, shown)}") from None
+
+
+def _obj_surfaces(path: str, tmp: str) -> tuple[str, int]:
+    """A copy of an OBJ without its line (l) and point (p) statements, in `tmp`, next to links to
+    its material libraries. Vertex numbering is unchanged: only those statements go."""
+    out, dropped, faces, libs = os.path.join(tmp, "surfaces.obj"), 0, 0, []
+    with open(path, "rb") as src, open(out, "wb") as dst:
+        for line in src:
+            head = line.lstrip()[:2]
+            if head in (b"l ", b"l\t", b"p ", b"p\t"):
+                dropped += 1
+                continue
+            faces += head in (b"f ", b"f\t")
+            if head == b"mt" and line.lstrip().startswith(b"mtllib"):
+                libs.append(line.lstrip()[6:].strip().decode("utf-8", "replace"))
+            dst.write(line)
+    if not faces:
+        raise SceneImportError("This file has only lines or points: no surfaces to show media on.")
+    here = os.path.dirname(os.path.abspath(path))
+    for lib in libs:
+        target, link = os.path.join(here, lib), os.path.join(tmp, lib)
+        if os.path.exists(target) and not os.path.lexists(link):
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            os.symlink(target, link)
+    return out, dropped
+
+
+def _assimp_message(e: Exception, path: str, shown: str | None = None) -> str:
     msg = str(e)
     prefix = f"Assimp error loading '{path}': "
-    return msg[len(prefix):] if msg.startswith(prefix) else msg
+    msg = (msg[len(prefix):] if msg.startswith(prefix) else msg).strip()
+    if msg:
+        return msg
+    v = _fbx_version(shown or path)
+    return (f"the importer gave no reason{f' (FBX {v})' if v else ''}. The file may be damaged or from an exporter "
+            "it cannot read; export it again (binary FBX 2020 or earlier, or OBJ) and import that.")
+
+
+def _fbx_version(path: str) -> str | None:
+    """'7.7' from a binary FBX header, or None."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(27)
+    except OSError:
+        return None
+    if not head.startswith(b"Kaydara FBX Binary") or len(head) < 27:
+        return None
+    v = int.from_bytes(head[23:27], "little")
+    return f"{v // 1000}.{v % 1000 // 100}"
 
 
 def _sha256(path: str) -> str:

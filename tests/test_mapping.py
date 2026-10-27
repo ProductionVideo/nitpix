@@ -199,6 +199,46 @@ class Workspace(unittest.TestCase):
         self.assertEqual(self.ms.objects.currentIndex(), 0)
         self.assertIn("could not be used", self.ms.empty_lab.text())
 
+    def test_a_failed_or_cancelled_reimport_keeps_the_stage_and_its_list(self):
+        ms = self.ms
+        self.import_("stage.fbx")
+        ms.select(["Stage/Floor"])
+        ms.apply_selected()
+        self.import_("garbage.fbx")                                          # damaged: refused
+        self.assertEqual(ms.objects.currentIndex(), 1)                       # the stage's objects, not an error page
+        self.assertTrue(ms.scene_lab.text().startswith("stage.fbx: 13 objects"), ms.scene_lab.text())
+        self.assertTrue(self.said[-1][1] and self.said[-1][0].startswith("garbage.fbx: "), self.said[-1])
+        self.assertEqual(list(ms.assign.uv), ["Stage/Floor"])
+        ms.import_scene(os.path.join(FIX, "stage.obj"))
+        ms.cancel_import()                                                   # while it is still running
+        pump(self.app, timeout=1.0)
+        self.assertEqual((ms.objects.currentIndex(), ms.scene_lab.text()[:9]), (1, "stage.fbx"))
+        self.assertEqual(list(ms.assign.uv), ["Stage/Floor"])
+
+    def test_a_stage_of_many_objects_lists_and_selects_quickly(self):
+        """20,000 objects (real show models reach 135,000). Finding objects by key and selecting
+        them row by row were both quadratic: minutes, and gigabytes, for a big stage."""
+        from array import array
+        from nitpix.scene import Geometry, NormalizedScene, SceneObject, uv_range
+        n = 20000
+        pos, idx, uv = array("f", [0, 0, 0, 1, 0, 0, 0, 1, 0]), array("I", [0, 1, 2]), array("f", [0, 0, 1, 0, 0, 1])
+        g = Geometry("mesh:0", pos, idx, (uv,), "Screen", "f", (uv_range(uv, idx, pos),))
+        world = tuple(float(i == j) for i in range(4) for j in range(4))
+        objs = tuple(SceneObject(f"Rig/Panel_{i:05d}", ("Rig", f"Panel_{i:05d}"), f"Panel_{i:05d}", ("mesh:0",), ("Screen",),
+                                 world, 1, 1, False, None, "f") for i in range(n))
+        scene = NormalizedScene({"path": "/generated"}, "test", objs, {"mesh:0": g}, ((0, 0, 0), (1, 1, 0)))
+        ms = self.ms
+        t = time.monotonic()
+        ms._set_scene(scene, "many.obj")
+        ms.select_shown()
+        ms.apply_selected()
+        ms.filter.setText("Panel_1999")
+        ms.select_shown()
+        took = time.monotonic() - t
+        self.assertEqual(len(ms.assign.uv), n)
+        self.assertEqual(sorted(ms.selected_keys()), [f"Rig/Panel_1999{d}" for d in range(10)])
+        self.assertLess(took, 20)                                           # was many minutes
+
     def test_filter_keeps_selection_and_assignments(self):
         ms = self.ms
         self.import_("stage.fbx")
@@ -285,15 +325,22 @@ class Workspace(unittest.TestCase):
         self.assertEqual(stage.text(0), "Stage")
         self.assertFalse(stage.flags() & Qt.ItemFlag.ItemIsSelectable)
 
-    def test_import_errors_are_explained(self):
+    def test_import_notes_and_errors_are_explained(self):
         d = tempfile.mkdtemp(dir=self.tmp)
-        p = os.path.join(d, "mixed.obj")
-        with open(p, "w") as fh:
+        mixed, wire = os.path.join(d, "mixed.obj"), os.path.join(d, "wire.obj")
+        with open(mixed, "w") as fh:
             fh.write("o Screen\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\no Wire\nv 0 0 1\nv 1 0 1\nl 4 5\n")
-        self.ms.import_scene(p)
+        with open(wire, "w") as fh:
+            fh.write("o Wire\nv 0 0 1\nv 1 0 1\nl 1 2\n")
+        self.ms.import_scene(wire)                                            # lines only: refused, and why
         self.assertTrue(pump(self.app, lambda: self.said, 30))
-        self.assertIn("lines or points", self.said[-1][0])
-        self.assertTrue(self.said[-1][1])
+        self.assertEqual(self.said[-1], ("wire.obj: This file has only lines or points: no surfaces to show media on.", True))
+        self.ms.import_scene(mixed)                                           # surfaces too: imported, lines noted
+        self.assertTrue(pump(self.app, lambda: self.ms.scene is not None, 30))
+        pump(self.app, timeout=0.05)
+        self.assertEqual(self.said[-1], ("1 line or point element ignored (only surfaces can show media).", False))
+        self.assertEqual([o.display for o in self.ms.scene.objects], ["Screen"])
+        self.ms._set_scene(None, "")
         self.import_("garbage.fbx")
         self.assertIn("Could not read this scene", self.said[-1][0])
         self.assertIsNone(self.ms.scene)
