@@ -17,6 +17,7 @@ Blender --background --factory-startup --python tools/scenes/make_fixtures.py --
 | `uvedge.fbx` | From `tools/scenes/make_uv_fixtures.py`: UVs within and just past the edge tolerance, out-of-range islands, tiled UVs, and an object whose two UV sets differ |
 | `edge.obj` / `.mtl` | Written as text: two objects named `Screen`, an object without UVs, a hexagon |
 | `truncated.fbx`, `garbage.fbx`, `truncated.obj` | Damaged files that must be refused with a readable error |
+| `parts/` | From `tools/scenes/make_parts.py`: one stage exported as separate files. `centre.obj` (positions in the file), `left.fbx` (placed by its node transform), `right.fbx` (centimetres, Z up, under a `Rig` node), `venue.obj` (floor, and a truss without UVs), `a/screen.obj` and `b/screen.obj` (same file name). Five files have an object called `Screen`. `parts/expected.json` has each UV corner's position in metres, Y up, taken from the Blender scene |
 | `expected.json` | Values taken from the Blender scene itself: object paths, triangles, material slots, UV sets, and every (position, UV) corner. UVs are exact float32 values; positions are in metres, Y up, to 1e-4 |
 
 The stage contains:
