@@ -229,6 +229,7 @@ class ReviewScreen(QWidget):
         self.focus_idx = -1
         self.order: list[int] = []   # asset ids, for prev/next
         self.note_draft = None
+        self.released = False        # the playback session is with another workspace (Mapping)
         self._save_frame = QTimer(self, singleShot=True, interval=1500)
         self._save_frame.timeout.connect(self._persist_frame)
         self._build()
@@ -410,18 +411,23 @@ class ReviewScreen(QWidget):
         self.order = list(ids)
         self._nav_buttons()
 
-    def load_asset(self, aid: int, keep_frame=False):
+    def load_asset(self, aid: int, keep_frame=False, frame: int | None = None):
+        """Show an asset. `frame` opens it there instead of at its saved position. After the
+        player was released to another workspace the asset is always loaded again, even if it is
+        the same one."""
         p = self.session.project
         a = service.asset_detail(p, aid)
         if not a:
             self.status.emit("Asset not found", True)
             return
         prev = self.asset
-        same = prev and prev["id"] == a["id"]
+        same = prev and prev["id"] == a["id"] and not self.released
+        self.released = False
         self.asset = a
         self.ctx = PosCtx(a)
         keep = keep_frame and same
-        self.playhead.begin(self.ctx.count, None if keep else min(a.get("last_frame") or 0, self.ctx.count - 1), new=not same)
+        start = min(a.get("last_frame") or 0, self.ctx.count - 1) if frame is None else max(0, min(self.ctx.count - 1, int(frame)))
+        self.playhead.begin(self.ctx.count, None if keep else start, new=not same)
         if not keep:
             self.focus_idx = -1
             self.note_draft = None
@@ -437,8 +443,35 @@ class ReviewScreen(QWidget):
         self.asset_changed.emit(a)
 
     def refresh(self):
-        if self.asset:
+        if self.asset and not self.released:
             self.load_asset(self.asset["id"], keep_frame=True)
+
+    # ---- one playback session across workspaces ----------------------------------------------
+    def release_playback(self):
+        """Hand the playback session to another workspace: the player stops (no decoding, no
+        sound, replies to earlier seeks ignored), a pending scrub is dropped at the frame asked
+        for, and that frame is saved. Returns (asset id, frame) or None."""
+        if self.released:
+            return (self.asset["id"], self.frame) if self.asset else None
+        self.released = True
+        self.player.unload()
+        if not self.asset:
+            return None
+        f = self.frame
+        self.playhead.begin(self.ctx.count, f, new=True)
+        self._save_frame.stop()
+        self._persist_frame()
+        return (self.asset["id"], f)
+
+    def resume_playback(self, handoff=None):
+        """Take the session back: load `handoff` (asset id, frame), or this screen's own asset."""
+        if not self.released:
+            return
+        aid, f = handoff if handoff else ((self.asset["id"], self.frame) if self.asset else (None, None))
+        if aid is None:
+            self.released = False
+            return
+        self.load_asset(aid, frame=f)
 
     def _render_header(self):
         a = self.asset

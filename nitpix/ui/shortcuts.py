@@ -57,6 +57,16 @@ SECTIONS = {
         ("Double-click", "Reveal an exported file in Finder"),
     ]),
     "settings": ("Settings", "Project and app preferences.", []),
+    "mapping": ("Mapping (experimental)", "The mapped clip on an imported stage, while it plays.", [
+        ("Drag", "Orbit the stage"),
+        ("Right-drag  ⇧-drag", "Pan"),
+        ("Scroll  pinch", "Zoom"),
+        ("F", "Frame the whole stage"),
+        ("Space", "Play / pause"),
+        ("← →  ⇧← ⇧→", "Step one frame / one second"),
+        ("Home  End", "First / last frame"),
+        (f"{MOD}-click  ⇧-click", "Select several objects in the list"),
+    ]),
 }
 EVERYWHERE = ("Everywhere", "", [
     ("1 – 6", "Dashboard, Media, Review, Specs, Reports, Settings (in Review too)"),

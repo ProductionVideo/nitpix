@@ -1,0 +1,315 @@
+"""The Mapping workspace, offscreen and without libmpv: assignment rules (nitpix/mapping.py), the
+workspace's object list and controls, stage import through the helper process, and the main
+window's handling of one playback session across QC and Mapping. tests/test_mapping_live.py
+checks drawn pictures and frames against real libmpv.
+.venv/bin/python -m unittest tests.test_mapping"""
+import os as _os, tempfile as _tempfile; _os.environ.setdefault("NITPIX_STATE_DIR", _tempfile.mkdtemp(prefix="nitpix state "))  # keep the real recent list untouched
+import importlib.util
+import os
+import shutil
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ["NITPIX_NO_MPV"] = "1"
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+FIX = os.path.join(HERE, "fixtures", "scenes")
+HAS = importlib.util.find_spec("PySide6") is not None and importlib.util.find_spec("assimp_py") is not None
+if HAS:
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    from nitpix import service, variant
+    from nitpix.mapping import MIXED, Assignments
+    from nitpix.scene import load_scene
+    from nitpix.store import Project
+    from nitpix.ui import theme
+    from test_scrub import FakeMpv
+
+
+def pump(app, until=None, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        app.processEvents()
+        if until is not None and until():
+            return True
+        time.sleep(0.01)
+    return until is None
+
+
+@unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
+class Rules(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.scene = load_scene(os.path.join(FIX, "stage.fbx"))
+
+    def setUp(self):
+        self.a = Assignments(self.scene)
+
+    def test_apply_clear_and_all(self):
+        a = self.a
+        screens = ["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"]
+        self.assertEqual(a.apply(screens), {})
+        self.assertEqual(sorted(a.uv), screens)
+        self.assertNotIn("Stage/Floor", a.uv)                                # the floor stays neutral
+        a.clear(["Stage/Screens/Left"])
+        self.assertEqual(sorted(a.uv), ["Stage/Screens/Centre", "Stage/Screens/Right"])
+        skipped = a.apply_all()
+        self.assertEqual(skipped, {})
+        self.assertNotIn("Stage/Truss", a.uv)                                # no UVs: never assigned
+        self.assertEqual(len(a.uv), len([o for o in self.scene.objects if o.uv_sets]))
+
+    def test_objects_without_uvs_are_refused_not_given_coordinates(self):
+        self.assertEqual(self.a.apply(["Stage/Truss"]), {"Stage/Truss": "no UVs"})
+        self.assertEqual(self.a.warning("Stage/Truss"), "no UVs: stays neutral")
+
+    def test_uv_sets_and_mixed_selections(self):
+        a = self.a
+        centre, left = "Stage/Screens/Centre", "Stage/Screens/Left"
+        self.assertEqual(a.uv_choices([centre]), [0, 1])                     # Centre has a second set
+        self.assertEqual(a.uv_choices([centre, left]), [0])                  # only what both have
+        self.assertEqual(a.apply([centre, left], 1), {left: "has no UV set 2"})
+        self.assertEqual(a.uv[centre], 1)
+        self.assertNotIn(left, a.uv)
+        a.apply([left], 0)
+        self.assertIs(a.uv_state([centre, left]), MIXED)
+        self.assertIs(a.assigned_state([centre, "Stage/Floor"]), MIXED)
+        a.apply([centre, left])                                              # None keeps each object's own set
+        self.assertEqual((a.uv[centre], a.uv[left]), (1, 0))
+
+    def test_out_of_range_follows_the_chosen_uv_set(self):
+        a = self.a
+        self.assertTrue(a.outside("Stage/Spill"))                            # authored -0.1..1.1
+        self.assertEqual(a.warning("Stage/Spill"), "UVs outside the image: neutral there")
+        self.assertFalse(a.outside("Stage/Screens/Centre", 0))
+        self.assertFalse(a.outside("Stage/Screens/Centre", 1))
+        self.assertFalse(a.outside("Stage/Truss"))
+
+
+@unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
+class Workspace(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.settings_dir = tempfile.mkdtemp(prefix="nitpix settings ")
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)  # keep tests out of the real preferences
+        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, cls.settings_dir)
+        cls.app.setStyleSheet(theme.STYLESHEET)
+        cls.tmp = tempfile.mkdtemp(prefix="nitpix mapping ")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, True)
+
+    def setUp(self):
+        from nitpix.ui.mapping import MappingScreen
+        self.session = service.Session()
+        self.session.project = p = Project(tempfile.mkdtemp(dir=self.tmp) + "/m.nitpix")
+        self.aid = p.upsert_asset("/m/a.mov", kind="video", name="a.mov", fps="25/1", frames=100, duration=4.0, scan_state="done")
+        p.upsert_asset("/m/b.wav", kind="audio", name="b.wav", scan_state="done")
+        self.ms = MappingScreen(self.session)
+        self.ms.resize(1300, 800)
+        self.ms.show()
+        self.said = []
+        self.ms.status.connect(lambda t, e: self.said.append((t, e)))
+
+    def tearDown(self):
+        self.ms.shutdown()
+        self.ms.close()
+        self.ms.deleteLater()
+        self.session.project.close()
+        pump(self.app, timeout=0.05)
+
+    def import_(self, name):
+        self.ms.import_scene(os.path.join(FIX, name))
+        self.assertTrue(pump(self.app, lambda: not self.ms.importer.busy and self.ms.import_btn.isEnabled(), 30))
+        pump(self.app, timeout=0.05)
+
+    def test_media_list_offers_visual_media_only(self):
+        self.ms.refresh_media()
+        self.assertEqual([self.ms.media_box.itemText(i) for i in range(self.ms.media_box.count())], ["a.mov"])
+
+    def test_import_list_assign_and_clear(self):
+        ms = self.ms
+        self.import_("stage.fbx")
+        self.assertIsNotNone(ms.scene)
+        rows = {it.data(0, 0x0100): it for it in ms._rows()}
+        self.assertEqual(rows["Stage/Logo_A#2"].text(0), "Logo_A (2)")       # duplicates told apart
+        self.assertEqual(rows["Stage/Truss"].text(2), "no UVs: stays neutral")
+        self.assertEqual(rows["Stage/Spill"].text(2), "UVs outside the image: neutral there")
+        ms.select(["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"])
+        self.assertTrue(ms.apply_btn.isEnabled())
+        ms.apply_selected()
+        self.assertEqual(sorted(ms.view.assigned), ["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"])
+        self.assertEqual(rows["Stage/Screens/Centre"].text(1), "● UV 1")
+        self.assertEqual(rows["Stage/Floor"].text(1), "")
+        ms.select(["Stage/Screens/Left"])
+        ms.clear_selected()
+        self.assertNotIn("Stage/Screens/Left", ms.view.assigned)
+        ms.select(["Stage/Screens/Centre", "Stage/Truss"])
+        self.assertIn("without UVs", ms.sel_lab.text())
+
+    def test_mixed_uv_sets_show_as_mixed(self):
+        ms = self.ms
+        self.import_("stage.fbx")
+        ms.select(["Stage/Screens/Centre"])
+        ms.uv_box.setCurrentIndex(ms.uv_box.findData(1))
+        ms.apply_selected()
+        ms.select(["Stage/Screens/Left"])
+        ms.apply_selected()
+        ms.select(["Stage/Screens/Centre", "Stage/Screens/Left"])
+        self.assertEqual(ms.uv_box.itemText(0), "Mixed: choose to set all")
+        ms.uv_box.setCurrentIndex(ms.uv_box.findData(0))
+        ms._on_uv_chosen(0)
+        self.assertEqual((ms.assign.uv["Stage/Screens/Centre"], ms.assign.uv["Stage/Screens/Left"]), (0, 0))
+
+    def test_group_rows_are_not_selectable(self):
+        self.import_("stage.fbx")
+        from PySide6.QtCore import Qt
+        stage = self.ms.tree.topLevelItem(0)
+        self.assertEqual(stage.text(0), "Stage")
+        self.assertFalse(stage.flags() & Qt.ItemFlag.ItemIsSelectable)
+
+    def test_import_errors_are_explained(self):
+        d = tempfile.mkdtemp(dir=self.tmp)
+        p = os.path.join(d, "mixed.obj")
+        with open(p, "w") as fh:
+            fh.write("o Screen\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\no Wire\nv 0 0 1\nv 1 0 1\nl 4 5\n")
+        self.ms.import_scene(p)
+        self.assertTrue(pump(self.app, lambda: self.said, 30))
+        self.assertIn("lines or points", self.said[-1][0])
+        self.assertTrue(self.said[-1][1])
+        self.import_("garbage.fbx")
+        self.assertIn("Could not read this scene", self.said[-1][0])
+        self.assertIsNone(self.ms.scene)
+
+    def test_a_project_change_drops_an_import_in_flight(self):
+        ms = self.ms
+        ms.import_scene(os.path.join(FIX, "stage.fbx"))
+        ms.reset_project()                           # before the helper answers
+        pump(self.app, timeout=2.0)
+        self.assertIsNone(ms.scene)
+        self.assertTrue(ms.import_btn.isEnabled())
+
+
+@unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
+class OneSession(unittest.TestCase):
+    """MainWindow with Mapping enabled: one player has a file at a time; switching keeps frames."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.settings_dir = tempfile.mkdtemp(prefix="nitpix settings ")
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, cls.settings_dir)
+        cls.app.setStyleSheet(theme.STYLESHEET)
+        cls.tmp = tempfile.mkdtemp(prefix="nitpix mapping session ")
+
+    def window(self, experimental=True):
+        from nitpix.ui.app import MainWindow
+        if experimental:
+            for name, value in (("IS_EXPERIMENTAL", True), ("VARIANT", "exp"), ("SETTINGS", ("nitpix-exp", "nitpix-exp"))):
+                p = mock.patch.object(variant, name, value)
+                p.start()
+                self.addCleanup(p.stop)
+        from nitpix.ui.prefs import prefs
+        prefs().clear()                                                      # each test starts with Mapping off
+        w = MainWindow(service.Session())
+        self.addCleanup(lambda: (w.close(), w.deleteLater()))
+        d = tempfile.mkdtemp(dir=self.tmp)
+        w.open_project(d + "/s.nitpix")
+        p = w.session.project
+        self.paths = {}
+        for name, frames in (("a.mov", 100), ("b.mov", 50)):
+            self.paths[name] = path = os.path.join(d, name)
+            open(path, "wb").close()                                         # present on disk; never decoded here
+            aid = p.upsert_asset(path, kind="video", name=name, fps="25/1", frames=frames, duration=frames / 25, scan_state="done")
+            setattr(self, name[0], aid)
+        return w
+
+    @staticmethod
+    def fake(player, path):
+        """What file-loaded does once libmpv has the file (the stand-in paths are not real)."""
+        player.m = player.m or FakeMpv()
+        player._pending = None
+        player.target, player.loaded = path, True
+        player.m.path = path
+
+    def test_release_build_has_no_mapping(self):
+        w = self.window(experimental=False)
+        self.assertNotIn("mapping", w.nav)
+        self.assertIsNone(w.mapping)
+        self.assertIsNone(w.settings_screen.mapping_box)
+        w.show_view("mapping")
+        self.assertEqual(w.current_view, "dashboard")
+
+    def test_off_by_default_then_enabled_from_settings(self):
+        w = self.window()
+        self.assertFalse(w.nav["mapping"].isVisibleTo(w))
+        self.assertIsNone(w.mapping)
+        w.settings_screen.refresh()
+        self.assertFalse(w.settings_screen.mapping_box.isChecked())
+        w.settings_screen.mapping_box.setChecked(True)
+        self.assertTrue(w.nav["mapping"].isVisibleTo(w))
+        self.assertIsNotNone(w.mapping)
+        from nitpix.ui.app import VIEWS
+        self.assertNotIn("mapping", VIEWS)                                   # 1-6 keep their screens
+
+    def test_switching_hands_over_one_session_and_keeps_the_frame(self):
+        w = self.window()
+        w.set_mapping_enabled(True)
+        rv, ms = w.review, w.mapping
+        ms.view.m = FakeMpv()                                                # the libmpv stand-in for Mapping's player too
+        w.show_asset(self.a)
+        rv.viewer_stack.setCurrentWidget(rv.player)
+        self.fake(rv.player, self.paths["a.mov"])
+        rv.scrub(60)                                                         # a scrub still pending...
+        self.assertTrue(rv.playhead.pending)
+        w.show_view("mapping")                                               # ...when the user switches
+        self.assertTrue(rv.released)
+        self.assertFalse(rv.player.loaded)                                   # QC's player let go: no decoding, no sound
+        self.assertFalse(rv.playhead.pending)
+        self.assertEqual(w.session.project.asset(self.a)["last_frame"], 60)
+        self.assertEqual(ms.asset["id"], self.a)
+        self.assertEqual(ms.playhead.frame, 60)                              # Mapping opens on the requested frame
+        self.assertEqual(ms.view._pending[2], 60)                            # and loads its player there
+        self.fake(ms.view, self.paths["a.mov"])
+        ms.playhead.scrub(75)
+        w.show_view("review")                                                # back, with Mapping's scrub pending
+        self.assertFalse(ms.view.loaded)
+        self.assertFalse(ms.playhead.pending)
+        self.assertFalse(rv.released)
+        self.assertEqual((rv.asset["id"], rv.frame), (self.a, 75))           # the same asset id, loaded again
+        self.assertIsNotNone(rv.player._pending)                             # a fresh load was requested
+        self.assertEqual(rv.player._pending[2], 75)
+
+    def test_changing_the_mapped_clip_and_leaving_via_another_screen(self):
+        w = self.window()
+        w.set_mapping_enabled(True)
+        w.show_asset(self.a)
+        w.show_view("mapping")
+        ms = w.mapping
+        ms._choose_media(self.b)
+        self.assertEqual(ms.asset["id"], self.b)
+        w.show_view("dashboard")                                             # not QC: Mapping still lets go
+        self.assertFalse(ms.active)
+        w.show_view("review")                                                # QC then shows the mapped clip
+        self.assertEqual(w.review.asset["id"], self.b)
+
+    def test_close_project_resets_mapping(self):
+        w = self.window()
+        w.set_mapping_enabled(True)
+        w.show_view("mapping")
+        w.mapping._set_scene(load_scene(os.path.join(FIX, "stage.obj")), "stage.obj")
+        w.close_project()
+        self.assertIsNone(w.mapping.scene)
+        self.assertEqual(w.current_view, "start")
+        self.assertFalse(w.review.released)
+
+
+if __name__ == "__main__":
+    unittest.main()

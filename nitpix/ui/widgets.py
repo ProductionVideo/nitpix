@@ -171,6 +171,15 @@ def nav_icon(name: str, light: str, dark: str, size: int = 18):
                     p.drawLine(QPointF(x * u, 12 * u), QPointF(x * u, 15 * u))
                 p.drawLine(QPointF(2 * u, 6 * u), QPointF(16 * u, 6 * u))
                 p.drawLine(QPointF(2 * u, 12 * u), QPointF(16 * u, 12 * u))
+            elif name == "mapping":   # a box in perspective: a stage
+                front = [QPointF(2 * u, 7 * u), QPointF(11 * u, 7 * u), QPointF(11 * u, 16 * u), QPointF(2 * u, 16 * u)]
+                back = [QPointF(q.x() + 5 * u, q.y() - 5 * u) for q in front]
+                for a, b in zip(front, front[1:] + front[:1]):
+                    p.drawLine(a, b)
+                for a, b in ((back[0], back[1]), (back[1], back[2])):
+                    p.drawLine(a, b)
+                for i in (0, 1, 2):
+                    p.drawLine(front[i], back[i])
             elif name == "review":
                 p.drawRoundedRect(QRectF(2 * u, 3 * u, 14 * u, 12 * u), 2 * u, 2 * u)
                 tri = QPainterPath()
