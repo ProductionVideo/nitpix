@@ -654,8 +654,11 @@ class MainWindow(QMainWindow):
             return True
         if ev.type() == QEvent.Type.KeyPress and QApplication.activeModalWidget() is None:
             fw = QApplication.focusWidget() or (obj if isinstance(obj, QWidget) else None)
+            view = getattr(self, "current_view", None)
+            if view == "mapping" and self.mapping is not None and ev.key() == Qt.Key.Key_Space \
+                    and not ev.modifiers() and self.mapping.closed_selector(fw):
+                return self.mapping.handle_key(ev)          # Space plays/pauses rather than opening the clip / UV list
             if not text_focused(fw) and (fw is None or fw.window() is self):
-                view = getattr(self, "current_view", None)
                 if view == "review" and self.review.handle_key(ev):
                     return True
                 if view == "mapping" and self.mapping is not None and self.mapping.handle_key(ev):
