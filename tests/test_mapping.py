@@ -199,6 +199,22 @@ class Workspace(unittest.TestCase):
         self.assertEqual(self.ms.objects.currentIndex(), 0)
         self.assertIn("could not be used", self.ms.empty_lab.text())
 
+    def test_a_failed_or_cancelled_reimport_keeps_the_stage_and_its_list(self):
+        ms = self.ms
+        self.import_("stage.fbx")
+        ms.select(["Stage/Floor"])
+        ms.apply_selected()
+        self.import_("garbage.fbx")                                          # damaged: refused
+        self.assertEqual(ms.objects.currentIndex(), 1)                       # the stage's objects, not an error page
+        self.assertTrue(ms.scene_lab.text().startswith("stage.fbx: 13 objects"), ms.scene_lab.text())
+        self.assertTrue(self.said[-1][1] and self.said[-1][0].startswith("garbage.fbx: "), self.said[-1])
+        self.assertEqual(list(ms.assign.uv), ["Stage/Floor"])
+        ms.import_scene(os.path.join(FIX, "stage.obj"))
+        ms.cancel_import()                                                   # while it is still running
+        pump(self.app, timeout=1.0)
+        self.assertEqual((ms.objects.currentIndex(), ms.scene_lab.text()[:9]), (1, "stage.fbx"))
+        self.assertEqual(list(ms.assign.uv), ["Stage/Floor"])
+
     def test_filter_keeps_selection_and_assignments(self):
         ms = self.ms
         self.import_("stage.fbx")

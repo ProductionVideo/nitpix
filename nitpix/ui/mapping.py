@@ -55,6 +55,7 @@ class MappingScreen(QWidget):
         self.scene = None
         self.assign = None
         self.scene_name = ""
+        self._kept_name = ""
         self._pending_frame = 0                # where a newly loaded clip is to be shown
         self.importer = Importer(self._imported.emit)
         self._imported.connect(self._on_imported, Qt.ConnectionType.QueuedConnection)
@@ -363,6 +364,7 @@ class MappingScreen(QWidget):
 
     def import_scene(self, path):
         import os
+        self._kept_name = self.scene_name             # the stage on show, if this import fails or is cancelled
         self.scene_name = os.path.basename(path)
         self._import_ui(True)
         self.importer.start(path)
@@ -370,6 +372,8 @@ class MappingScreen(QWidget):
     def cancel_import(self):
         self.importer.cancel()
         self._import_ui(False)
+        if self.scene:
+            self.scene_name = self._kept_name
         self.scene_lab.setText(f"{self.scene_name}: import cancelled" if not self.scene else self._scene_text())
         self._show_objects()
 
@@ -380,16 +384,18 @@ class MappingScreen(QWidget):
         self.cancel_btn.setVisible(busy)
         if busy:
             self.scene_lab.setText(f"Importing {self.scene_name}…")
-            self._show_objects(f"Importing {self.scene_name}…\nPlayback carries on meanwhile.")
+            if self.scene is None:                    # a stage on show keeps its list while the next one loads
+                self._show_objects(f"Importing {self.scene_name}…\nPlayback carries on meanwhile.")
 
     def _on_imported(self, gen, scene, error):
         if gen != self.importer.generation:
             return                                    # cancelled, superseded, or another project
         self._import_ui(False)
         if error:
+            failed, self.scene_name = self.scene_name, self._kept_name if self.scene else self.scene_name
             self.scene_lab.setText(self._scene_text() if self.scene else "No stage imported")
-            self.status.emit(f"{self.scene_name}: {error}", True)
-            self._show_objects(f"{self.scene_name} could not be used: {error}")
+            self.status.emit(f"{failed}: {error}", True)
+            self._show_objects(None if self.scene else f"{failed} could not be used: {error}")   # a stage keeps its list
             return
         self._set_scene(scene, self.scene_name)
         if scene.warnings:
