@@ -1,6 +1,6 @@
 [project]
 name = "nitpix-review"
-version = "0.6.1"
+version = "0.7.0"
 license = "MIT"
 license-files = ["LICENSE"]
 description = "nitpix: delivery QC for video, audio, stills and image sequences, with frame-accurate review on embedded libmpv."

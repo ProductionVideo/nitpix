@@ -5,18 +5,31 @@ assignments, sharing the transport behaviour through the Playhead. One playback 
 time: MainWindow calls activate() / deactivate() as the user moves between the workspaces, and a
 deactivated workspace has no file loaded, so it cannot play, decode, make sound or seek.
 
+The stage is composed from one or more model files (nitpix/stage.py). Add models… reads files
+one at a time through the import helper and puts each on the stage as it arrives, keeping what is
+there (objects, assignments, clip, playback and camera). Replace stage… keeps the current stage
+until the new files are read, then swaps once to whichever of them could be used. Cancelling
+stops the file being read and those still queued: an Add keeps the files already added, a Replace
+leaves the stage as it was. Remove takes one file's objects off the stage; files on disk are only
+ever read.
+
 Session only for now: the imported stage, the assignments and the camera last while the
 app runs and are not saved with the project.
 """
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass, field
+
 from PySide6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QSplitter, QStackedWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QLineEdit, QMenu, QSplitter, QStackedWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from .. import service
 from ..mapping import MIXED, Assignments, share
 from ..sceneimport import Importer
+from ..stage import Stage, split_key
 from . import theme
 from .mapview import MAX_TEXTURE, MappingView
 from .playhead import Playhead
@@ -25,6 +38,7 @@ from .timeline import Timeline
 from .widgets import ElideLabel, repolish
 
 KEY = Qt.ItemDataRole.UserRole
+SOURCE = Qt.ItemDataRole.UserRole + 1         # a model file's row: its source id
 MEDIA_KINDS = ("video", "sequence", "image")
 SESSION_NOTE = "Session only: the imported stage, its assignments and the camera are not saved with the project."
 CAMERA_HINT = "Drag to orbit · ⇧-drag or right-drag to pan · scroll to zoom · F frames the stage"
@@ -42,6 +56,20 @@ class _Filter(QLineEdit):
         super().keyPressEvent(ev)
 
 
+@dataclass
+class _Batch:
+    """One Add or Replace: files read one after another (one helper process at a time)."""
+    mode: str                                 # "add" or "replace"
+    queue: list                               # paths still to read
+    total: int
+    current: str = ""
+    added: list = field(default_factory=list)      # add: Sources put on the stage
+    read: list = field(default_factory=list)       # replace: scenes read, swapped in at the end
+    failed: list = field(default_factory=list)     # (name, why)
+    skipped: list = field(default_factory=list)    # (name, why): not read at all
+    cancelled: bool = False
+
+
 class MappingScreen(QWidget):
     status = Signal(str, bool)                 # toast text, is_error
     _imported = Signal(int, object, object)    # from the importer's thread: generation, scene, error
@@ -52,14 +80,18 @@ class MappingScreen(QWidget):
         self.active = False
         self.asset = None                      # the mapped clip (asset detail)
         self.ctx = None
-        self.scene = None
+        self.stage = Stage()
         self.assign = None
-        self.scene_name = ""
-        self._kept_name = ""
+        self._batch = None                     # the Add / Replace in progress
         self._pending_frame = 0                # where a newly loaded clip is to be shown
         self.importer = Importer(self._imported.emit)
         self._imported.connect(self._on_imported, Qt.ConnectionType.QueuedConnection)
         self._build()
+
+    @property
+    def scene(self):
+        """The stage on show, or None while it has no model files."""
+        return self.stage if self.stage else None
 
     # ---- layout ------------------------------------------------------------------------
     def _build(self):
@@ -80,8 +112,12 @@ class MappingScreen(QWidget):
         self.scene_lab = ElideLabel("No stage imported", Qt.TextElideMode.ElideMiddle, min_chars=8)
         self.scene_lab.setProperty("muted", True)
         head.addWidget(self.scene_lab, 3)
-        self.import_btn = btn("Import stage…", "Read an OBJ or FBX stage model", self.import_dialog)
-        head.addWidget(self.import_btn)
+        self.add_btn = btn("Add models…", "Add OBJ or FBX model files to the stage, where they were exported. "
+                           "What is on the stage stays, with its assignments.", self.add_dialog)
+        head.addWidget(self.add_btn)
+        self.replace_btn = btn("Replace stage…", "Swap the whole stage for other model files. The current stage stays "
+                               "until they have been read.", self.replace_dialog)
+        head.addWidget(self.replace_btn)
         self.cancel_btn = btn("Cancel import", "", self.cancel_import)
         self.cancel_btn.hide()
         head.addWidget(self.cancel_btn)
@@ -174,6 +210,16 @@ class MappingScreen(QWidget):
         self.shown_btn = btn("Select shown", "Select every object the filter shows", self.select_shown)
         frow.addWidget(self.shown_btn)
         rlay.addLayout(frow)
+        self.result = QFrame()                         # what the last Add / Replace did, until dismissed
+        res = QHBoxLayout(self.result)
+        res.setContentsMargins(0, 0, 0, 0)
+        self.result_lab = QLabel()
+        self.result_lab.setWordWrap(True)
+        self.result_lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        res.addWidget(self.result_lab, 1)
+        res.addWidget(btn("×", "Dismiss", lambda: self.result.hide(), ghost=True), 0, Qt.AlignmentFlag.AlignTop)
+        self.result.hide()
+        rlay.addWidget(self.result)
         self.objects = QStackedWidget()
         self.empty_lab = QLabel()
         self.empty_lab.setWordWrap(True)
@@ -183,7 +229,7 @@ class MappingScreen(QWidget):
         el = QVBoxLayout(empty)
         el.addStretch(1)
         el.addWidget(self.empty_lab)
-        self.empty_import = btn("Import stage…", "Read an OBJ or FBX stage model", self.import_dialog, primary=True)
+        self.empty_import = btn("Add models…", "Read one or more OBJ or FBX model files as one stage", self.add_dialog, primary=True)
         el.addWidget(self.empty_import, 0, Qt.AlignmentFlag.AlignHCenter)
         el.addStretch(2)
         self.objects.addWidget(empty)
@@ -200,6 +246,9 @@ class MappingScreen(QWidget):
         widest = max(self.tree.fontMetrics().horizontalAdvance(t) for t in ("● UV 8 ⚠", "no UVs", "Media"))   # every row on each change
         self.tree.header().resizeSection(1, widest + 28)
         self.tree.itemSelectionChanged.connect(self._on_selection)
+        self.tree.itemClicked.connect(self._on_row_clicked)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._row_menu)
         self.objects.addWidget(self.tree)
         rlay.addWidget(self.objects, 1)
 
@@ -234,8 +283,11 @@ class MappingScreen(QWidget):
         acts.addWidget(self.apply_btn, 1)
         acts.addWidget(self.clear_btn)
         il.addLayout(acts)
-        self.all_btn = btn("Apply to all with UVs", "Every object with UVs shows the clip", self.apply_all, ghost=True)
+        self.all_btn = btn("Apply to all with UVs", "Every object with UVs, in every model file, shows the clip", self.apply_all, ghost=True)
         il.addWidget(self.all_btn)
+        self.remove_btn = btn("Remove from stage", "", self.remove_selected_source, ghost=True)
+        self.remove_btn.hide()
+        il.addWidget(self.remove_btn)
         rlay.addWidget(insp)
         split.addWidget(right)
         split.setStretchFactor(0, 3)
@@ -243,6 +295,7 @@ class MappingScreen(QWidget):
         split.setSizes([900, 340])
         root.addWidget(split, 1)
         self._show_objects()
+        self._import_ui(False)
         self._refresh_controls()
 
     # ---- workspace lifecycle -----------------------------------------------------------------
@@ -270,11 +323,13 @@ class MappingScreen(QWidget):
 
     def reset_project(self):
         """Another project (or none): drop the stage, assignments, clip and any import in progress."""
+        self._batch = None
         self.importer.cancel()
         self._import_ui(False)
         self.deactivate()
         self.asset = self.ctx = None
-        self._set_scene(None, "")
+        self._replace_with([])
+        self.result.hide()
         self.media_box.clear()
         self.tc_lab.setText("--:--:--:--")
         self.tc_sub.setText("")
@@ -360,107 +415,308 @@ class MappingScreen(QWidget):
             self.status.emit("Choose a clip to map first" if not self.asset else "The clip is still loading", True)
 
     # ---- import ------------------------------------------------------------------------
-    def import_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import a stage model", "", "Stage models (*.obj *.fbx *.OBJ *.FBX)")
-        if path:
-            self.import_scene(path)
+    def add_dialog(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add model files to the stage", "", "Stage models (*.obj *.fbx *.OBJ *.FBX)")
+        if paths:
+            self.add_models(paths)
 
-    def import_scene(self, path):
-        import os
-        self._kept_name = self.scene_name             # the stage on show, if this import fails or is cancelled
-        self.scene_name = os.path.basename(path)
+    def replace_dialog(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Replace the stage with these model files", "", "Stage models (*.obj *.fbx *.OBJ *.FBX)")
+        if paths:
+            self.replace_stage(paths)
+
+    def add_models(self, paths):
+        """Put these files on the stage as well, each as soon as it is read."""
+        self._start("add", paths)
+
+    def replace_stage(self, paths):
+        """A new stage from these files; the current one stays until they are read."""
+        self._start("replace", paths)
+
+    def _start(self, mode, paths):
+        if self._batch is not None:
+            return
+        queue, skipped, seen = [], [], set()
+        for p in paths:
+            real, name = os.path.realpath(p), os.path.basename(p)
+            there = self.stage.has_path(p) if mode == "add" else None
+            if there is not None:
+                skipped.append((name, f"already on the stage as {self.stage.label(there)}"))
+            elif real in seen:
+                skipped.append((name, "chosen twice"))
+            else:
+                seen.add(real)
+                queue.append(p)
+        self._batch = _Batch(mode, queue, len(queue), skipped=skipped)
+        self.result.hide()
+        if not queue:
+            return self._finish()
         self._import_ui(True)
-        self.importer.start(path)
+        self._next()
+
+    def _next(self):
+        b = self._batch
+        b.current = b.queue.pop(0)
+        n = b.total - len(b.queue)
+        name = os.path.basename(b.current)
+        what = ("Adding" if b.mode == "add" else "Reading") + (f" {n} of {b.total}: " if b.total > 1 else " ") + name + "…"
+        self.scene_lab.setText(what)
+        if not self.stage:                    # a stage on show keeps its list while files are read
+            self._show_objects(f"{what}\nPlayback carries on meanwhile.")
+        self.importer.start(b.current)
 
     def cancel_import(self):
+        """Stop the file being read and any still queued. An Add keeps what it already added."""
+        if self._batch is None:
+            return
         self.importer.cancel()
-        self._import_ui(False)
-        if self.scene:
-            self.scene_name = self._kept_name
-        self.scene_lab.setText(f"{self.scene_name}: import cancelled" if not self.scene else self._scene_text())
-        self._show_objects()
+        self._batch.cancelled = True
+        self._batch.skipped += [(os.path.basename(p), "not read") for p in [self._batch.current, *self._batch.queue]]
+        self._batch.queue = []
+        self._finish()
 
     def _import_ui(self, busy):
-        self.import_btn.setEnabled(not busy)
-        self.empty_import.setEnabled(not busy)
-        self.import_btn.setVisible(not busy)
+        for w in (self.add_btn, self.empty_import):
+            w.setEnabled(not busy)
+        self.add_btn.setVisible(not busy)
+        self.replace_btn.setVisible(not busy)
+        self.replace_btn.setEnabled(not busy and bool(self.stage))
         self.cancel_btn.setVisible(busy)
-        if busy:
-            self.scene_lab.setText(f"Importing {self.scene_name}…")
-            if self.scene is None:                    # a stage on show keeps its list while the next one loads
-                self._show_objects(f"Importing {self.scene_name}…\nPlayback carries on meanwhile.")
+        if not busy:
+            self.scene_lab.setText(self._scene_text())
 
     def _on_imported(self, gen, scene, error):
-        if gen != self.importer.generation:
+        b = self._batch
+        if b is None or gen != self.importer.generation:
             return                                    # cancelled, superseded, or another project
-        self._import_ui(False)
+        name = os.path.basename(b.current)
         if error:
-            failed, self.scene_name = self.scene_name, self._kept_name if self.scene else self.scene_name
-            self.scene_lab.setText(self._scene_text() if self.scene else "No stage imported")
-            self.status.emit(f"{failed}: {error}", True)
-            self._show_objects(None if self.scene else f"{failed} could not be used: {error}")   # a stage keeps its list
-            return
-        self._set_scene(scene, self.scene_name)
-        if scene.warnings:
-            self.status.emit(" ".join(scene.warnings), False)
+            b.failed.append((name, error))
+        elif b.mode == "add":
+            b.added.append(self._add_scene(scene))
+        else:
+            b.read.append(scene)
+        if b.queue:
+            self._next()
+        else:
+            self._finish()
 
-    def _set_scene(self, scene, name):
-        self.scene = scene
-        self.assign = Assignments(scene) if scene else None
-        self.scene_name = name
+    def _finish(self):
+        b, self._batch = self._batch, None
+        if b.mode == "replace" and b.read and not b.cancelled:
+            self._replace_with(b.read)                # once, with every file that could be used
+        self._import_ui(False)
+        text, bad = self._summary(b)
+        new = self.stage.sources if b.mode == "replace" and b.read and not b.cancelled else b.added
+        notes = [f"{self.stage.label(s)}: {w}" for s in new for w in s.scene.warnings]
+        if text:
+            self.status.emit(text if not notes else f"{text} {' '.join(notes)}", bad)
+        if not self.stage:
+            self._show_objects(text or None)
+        else:
+            self._show_objects()
+            if text and (bad or notes or b.skipped):
+                self._show_result(b, notes, bad, text)
+
+    def _show_result(self, b, notes, bad, text):
+        """Above the list, until dismissed: a count, then one short line per file that needs a look
+        (the list already names the files added). The full wording is in the tooltip and the toast."""
+        cut = lambda t: t if len(t) <= 90 else t[:89].rstrip() + "…"
+        n = len(b.added) if b.mode == "add" else len(b.read)
+        head = (("Cancelled: " if b.cancelled else "") + f"{n} of {b.total} model file{'s' if b.total != 1 else ''} "
+                + ("added." if b.mode == "add" else "read; the stage was replaced." if n and not b.cancelled else "read; the stage is unchanged."))
+        lines = [head] if b.total else []
+        lines += [cut(f"✕ {name}: {why}") for name, why in b.failed]
+        lines += [cut(f"– {name}: {why}") for name, why in b.skipped]
+        lines += [cut(f"· {note}") for note in notes]
+        self.result_lab.setText("\n".join(lines))
+        self.result_lab.setToolTip(text + "".join(f"\n{note}" for note in notes))
+        self.result_lab.setStyleSheet(f"color: {theme.T['warn' if bad else 'muted']};")
+        self.result.show()
+
+    def _summary(self, b) -> tuple[str, bool]:
+        """What an Add or Replace did, for the person who started it, and whether anything went wrong."""
+        def names(xs):
+            xs = list(xs)
+            return xs[0] if len(xs) == 1 else ", ".join(xs[:-1]) + " and " + xs[-1]
+        failed = " ".join(f"{n} could not be used: {why}" + ("" if why.endswith(".") else ".") for n, why in b.failed)
+        skipped = [(n, why) for n, why in b.skipped if why != "not read"]
+        unread = [n for n, why in b.skipped if why == "not read"]
+        added = [self.stage.label(s) for s in b.added]
+        parts = []
+        if b.mode == "add":
+            if b.cancelled:
+                parts.append(f"Cancelled: {names(added) if added else 'nothing'} added"
+                             + (" (kept on the stage)" if b.added else "") + (f"; {names(unread)} not read." if unread else "."))
+            elif b.added:
+                parts.append(f"Added {names(added)}." if not b.failed else f"Added {len(added)} of {b.total} model files: {names(added)}.")
+        else:
+            if b.cancelled:
+                parts.append("Replace cancelled: the stage is unchanged.")
+            elif b.read:
+                parts.append("Stage replaced" + (f" with {len(b.read)} of {b.total} model files." if b.failed else "."))
+            elif b.total:
+                parts.append("The stage is unchanged: none of the files could be used.")
+        if failed:
+            parts.append(failed)
+        parts += [f"{n}: {why}, not added again." if why.startswith("already") else f"{n}: {why}." for n, why in skipped]
+        bad = bool(b.failed) or (not b.added and not b.read and not b.cancelled)
+        return " ".join(parts), bad
+
+    # ---- the stage -------------------------------------------------------------------------
+    def _add_scene(self, scene):
+        """One more model file on the stage. Everything already there stays as it is."""
+        first = not self.stage
+        if self.assign is None:
+            self.assign = Assignments(self.stage)
+        src = self.stage.add(scene)
+        self.view.set_scene(self.stage, frame=first)  # only the new meshes are uploaded; the camera stays
+        self._add_rows(src)
+        self._relabel()
+        self._apply_filter(self.filter.text())
+        self._push()
+        self._show_objects()
+        return src
+
+    def _replace_with(self, scenes):
+        """A new stage of these scenes (none: empty). Assignments and the filter start again; source
+        ids carry on, so no id means two different files in one session."""
+        self.tree.clear()                             # rows (and the selection) go while their objects still exist
+        self.stage = Stage(next_id=self.stage.next_id)
+        for sc in scenes:
+            self.stage.add(sc)
+        self.assign = Assignments(self.stage) if self.stage else None
         self.filter.clear()
-        self.view.set_scene(scene)
-        self.scene_lab.setText(self._scene_text() if scene else "No stage imported")
-        self.scene_lab.setToolTip(scene.source["path"] if scene else "")
+        self.view.set_scene(self.stage if self.stage else None)
         self._fill_tree()
         self._show_objects()
+        self.scene_lab.setText(self._scene_text())
+
+    def remove_source(self, sid):
+        """Take one model file, its objects and their assignments off the stage. The file is not touched."""
+        if self.stage.source(sid) is None:
+            return
+        for i in range(self.tree.topLevelItemCount()):    # rows first: the selection changes while the objects still exist
+            if self.tree.topLevelItem(i).data(0, SOURCE) == sid:
+                self.tree.takeTopLevelItem(i)
+                break
+        src = self.stage.remove(sid)
+        self.assign.prune()
+        self.view.set_scene(self.stage if self.stage else None, frame=False)
+        if not self.stage:
+            self.assign = None
+        self._relabel()
+        self._on_selection()
+        self._show_objects()
+        self.scene_lab.setText(self._scene_text())
+        self.replace_btn.setEnabled(bool(self.stage) and self._batch is None)
+        self.status.emit(f"Removed {src.name} from the stage (the file is unchanged).", False)
+
+    def remove_selected_source(self):
+        sid = self._selected_source()
+        if sid:
+            self.remove_source(sid)
+
+    def _selected_source(self):
+        """The one model file every selected object comes from, else None."""
+        sids = {split_key(k)[0] for k in self.selected_keys()}
+        return sids.pop() if len(sids) == 1 else None
 
     def _show_objects(self, message=None):
         """The object list once there is a stage; before that, what to do next (or what happened)."""
-        has = self.scene is not None and message is None
+        has = bool(self.stage) and message is None
         self.objects.setCurrentIndex(1 if has else 0)
         self.filter.setEnabled(has)
         self.shown_btn.setEnabled(has)
         if not has:
-            self.empty_lab.setText(message or "No stage yet.\nImport an OBJ or FBX stage, then choose the objects that show the clip.")
-            self.empty_import.setVisible(self.import_btn.isEnabled())
+            self.empty_lab.setText(message or "No stage yet.\nAdd one or more OBJ or FBX model files: together they "
+                                   "form one stage, each where it was exported. Then choose the objects that show the clip.")
+            self.empty_import.setVisible(self.add_btn.isEnabled())
 
     def _scene_text(self):
-        s = self.scene
+        s = self.stage
+        if not s:
+            self.scene_lab.setToolTip("")
+            return "No stage imported"
         tris = sum(o.triangles for o in s.objects)
-        return f"{self.scene_name}: {len(s.objects)} objects, {tris:,} triangles"
+        self.scene_lab.setToolTip("\n".join(src.path for src in s.sources))
+        what = s.label(s.sources[0]) if len(s.sources) == 1 else f"{len(s.sources)} model files"
+        return f"{what}: {len(s.objects)} objects, {tris:,} triangles"
 
     # ---- objects and assignments ------------------------------------------------------------
     def _fill_tree(self):
         self.tree.clear()
-        if not self.scene:
-            self._refresh_controls()
-            return
+        for src in self.stage.sources:
+            self._add_rows(src)
+        self._relabel()
+        self._apply_filter(self.filter.text())
+
+    def _add_rows(self, src):
+        """One model file's row, with its objects below it in the file's own hierarchy."""
+        top = QTreeWidgetItem(["", ""])
+        top.setData(0, SOURCE, src.id)
+        top.setFlags(top.flags() & ~Qt.ItemFlag.ItemIsSelectable)     # clicking it selects its objects
+        f = top.font(0)
+        f.setBold(True)
+        top.setFont(0, f)
+        self.tree.addTopLevelItem(top)
         items = {}
-        for o in self.scene.objects:
-            parts = o.key.split("/")
-            parent = None
+        muted = theme.colour("muted")
+        for o in src.objects:
+            parts = split_key(o.key)[1].split("/")
+            parent = top
             for d in range(1, len(parts)):
                 k = "/".join(parts[:d])
                 if k not in items:
                     it = QTreeWidgetItem([o.path[d - 1] + ("" if "#" not in parts[d - 1] else f" ({parts[d - 1].rsplit('#', 1)[1]})"), ""])
                     it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-                    it.setForeground(0, theme.colour("muted"))
-                    (parent.addChild(it) if parent else self.tree.addTopLevelItem(it))
+                    it.setForeground(0, muted)
+                    parent.addChild(it)
                     items[k] = it
                 parent = items[k]
             it = QTreeWidgetItem([o.display, ""])
             it.setData(0, KEY, o.key)
-            (parent.addChild(it) if parent else self.tree.addTopLevelItem(it))
-            items[o.key] = it
-        self.tree.expandAll()
+            parent.addChild(it)
+        top.setExpanded(True)
+        for it in items.values():
+            it.setExpanded(True)
         self._refresh_rows()
-        self._apply_filter(self.filter.text())
         self._refresh_controls()
 
-    def _rows(self):
+    def _relabel(self):
+        """File rows named so that two files with one name can be told apart."""
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            src = self.stage.source(top.data(0, SOURCE))
+            if src is None:
+                continue
+            top.setText(0, self.stage.label(src))
+            tris = sum(o.triangles for o in src.objects)
+            tip = (f"{src.path}\n{len(src.objects)} objects, {tris:,} triangles · {src.scene.importer}"
+                   + "".join(f"\n{w}" for w in src.scene.warnings) + "\nClick to select its objects; right-click to remove it.")
+            top.setToolTip(0, tip)
+
+    def _on_row_clicked(self, it, _col):
+        sid = it.data(0, SOURCE)
+        if sid:
+            self.select([i.data(0, KEY) for i in self._rows(it) if not self._hidden(i)])
+
+    def _row_menu(self, pos):
+        it = self.tree.itemAt(pos)
+        while it is not None and it.parent() is not None:
+            it = it.parent()
+        src = self.stage.source(it.data(0, SOURCE)) if it is not None else None
+        if src is None:
+            return
+        m = QMenu(self)
+        m.addAction(f"Select the objects of {self.stage.label(src)}", lambda: self._on_row_clicked(it, 0))
+        m.addAction(f"Remove {self.stage.label(src)} from stage", lambda: self.remove_source(src.id))
+        m.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _rows(self, under=None):
+        """Object rows, everywhere or below one row."""
         out = []
-        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        stack = [under] if under is not None else [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
         while stack:
             it = stack.pop()
             if it.data(0, KEY):
@@ -485,7 +741,8 @@ class MappingScreen(QWidget):
             it.setText(1, text)
             it.setForeground(1, colours["warn" if w else "muted" if uv is None else "ink"])
             o = self.assign.object(k)
-            tip = (f"{o.key}\n{o.triangles:,} triangles · {len(o.slots)} material slot(s): {', '.join(o.slots)}\n"
+            src = self.stage.source_of(k)
+            tip = (f"{split_key(k)[1]}\nin {self.stage.label(src)}\n{o.triangles:,} triangles · {len(o.slots)} material slot(s): {', '.join(o.slots)}\n"
                    + (f"Shows the clip: {w}.\n" if w else "") + self.assign.details(k))
             for c in range(2):
                 it.setToolTip(c, tip)
@@ -581,6 +838,8 @@ class MappingScreen(QWidget):
             hidden = sum(1 for it in self._selected_items() if self._hidden(it))
             first = a.object(keys[0])
             bits = [first.display if len(keys) == 1 else f"{len(keys)} selected"]
+            if len(self.stage.sources) > 1 and self._selected_source():
+                bits.append(f"in {self.stage.label(self.stage.source_of(keys[0]))}")
             if len(keys) > 1 or shown:
                 bits.append("shows the clip" if len(keys) == 1 else f"{shown} show the clip" if shown else "none show the clip")
             if hidden:
@@ -607,6 +866,14 @@ class MappingScreen(QWidget):
         n_all = sum(1 for o in a.scene.objects if o.uv_sets) if a else 0
         self.all_btn.setText(f"Apply to all {n_all} with UVs" if n_all else "Apply to all with UVs")
         self.all_btn.setEnabled(bool(n_all))
+        sid = self._selected_source() if keys else None
+        src = self.stage.source(sid) if sid else None
+        self.remove_btn.setVisible(src is not None)
+        if src is not None:
+            name = self.stage.label(src)
+            self.remove_btn.setText(f"Remove {name} from stage")
+            self.remove_btn.setToolTip(f"Take {name} and its {len(src.objects)} objects (and their assignments) off the stage. "
+                                       f"The file itself is not changed.\n{src.path}")
 
     def _selection_warning(self, eligible):
         """For the selection, in the UV set chosen (or each object's own when mixed): which parts

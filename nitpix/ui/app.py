@@ -1206,8 +1206,9 @@ def _mapping_check(app, win, stage: str, shot: str):
     (not physical keys). At every step: only one player holds a file (one source of sound), and
     no player error; the longest event-loop stall is reported. Grabs the window at a few points
     (shot-1-mapping.png ... next to `shot`). NITPIX_SCREENSHOT_SLOW names a model slow enough to
-    cancel mid-import, NITPIX_SCREENSHOT_BAD a damaged one. Ends by closing the window while
-    Mapping plays."""
+    cancel mid-import, NITPIX_SCREENSHOT_BAD a damaged one, NITPIX_SCREENSHOT_PARTS a folder of
+    separately exported screen models to add to the stage while it plays (and then remove one).
+    Ends by closing the window while Mapping plays."""
     import time as _time
     from PySide6.QtGui import QKeyEvent
     base = os.path.splitext(shot)[0]
@@ -1241,7 +1242,7 @@ def _mapping_check(app, win, stage: str, shot: str):
             QApplication.sendEvent(widget, QKeyEvent(t, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier, " "))
 
     def wait_import(then, limit=600):
-        if ms().importer.busy and limit > 0:
+        if ms()._batch is not None and limit > 0:
             return QTimer.singleShot(100, lambda: wait_import(then, limit - 1))
         then()
 
@@ -1262,28 +1263,34 @@ def _mapping_check(app, win, stage: str, shot: str):
     add(lambda: space(ms().media_box), 500)
     add(lambda: check("Space again pauses", ms().view.paused), 10)
     slow = os.environ.get("NITPIX_SCREENSHOT_SLOW") or stage      # a model big enough to cancel mid-import
-    add(lambda: (ms().import_scene(slow), QTimer.singleShot(300, ms().cancel_import)), 1000)
-    add(lambda: check("Import cancelled: no stage, Import offered again", ms().scene is None and ms().import_btn.isEnabled()
+    add(lambda: (ms().add_models([slow]), QTimer.singleShot(300, ms().cancel_import)), 1000)
+    add(lambda: check("Import cancelled: no stage, Add offered again", ms().scene is None and ms().add_btn.isEnabled()
                       and not ms().importer.busy, ms().empty_lab.text().splitlines()[0]), 10)
-    add(lambda: ms().import_scene(stage), 300)
+    add(lambda: ms().add_models([stage]), 300)
     add(lambda: wait_import(lambda: check("Import restarted", ms().scene is not None,
                                           f"{len(ms().scene.objects) if ms().scene else 0} objects")), 1500)
+
+    def K(key):                                   # a key of the stage model, the first file on the stage
+        return f"{ms().stage.sources[0].id}:{key}"
     bad = os.environ.get("NITPIX_SCREENSHOT_BAD")
     if bad:
-        add(lambda: (ms().import_scene(bad)), 300)
-        add(lambda: wait_import(lambda: check("Damaged model refused, stage kept", ms().scene is not None and ms().objects.currentIndex() == 1,
-                                              win.toast_lab.text())), 1000)
+        add(lambda: (ms().add_models([bad])), 300)
+        add(lambda: wait_import(lambda: check("Damaged model refused, stage kept", ms().scene is not None and ms().objects.currentIndex() == 1
+                                              and len(ms().stage.sources) == 1, win.toast_lab.text())), 1000)
+        add(lambda: (ms().replace_stage([bad])), 300)
+        add(lambda: wait_import(lambda: check("Replace with a damaged model: stage unchanged", len(ms().stage.sources) == 1
+                                              and ms().stage.sources[0].name == os.path.basename(stage), win.toast_lab.text())), 1000)
     add(lambda: (ms().filter.setText("scre"), ms().select_shown()), 300)
     add(lambda: (ms().apply_selected(), check("Filter, Select shown, Apply", len(ms().assign.uv) == 3, ms().sel_lab.text())), 300)
-    add(lambda: (ms().filter.clear(), ms().select(["Stage/Screens/Left"]), ms().clear_selected(),
-                 check("Clear one", sorted(ms().assign.uv) == ["Stage/Screens/Centre", "Stage/Screens/Right"])), 300)
+    add(lambda: (ms().filter.clear(), ms().select([K("Stage/Screens/Left")]), ms().clear_selected(),
+                 check("Clear one", sorted(ms().assign.uv) == [K("Stage/Screens/Centre"), K("Stage/Screens/Right")])), 300)
 
     def s_uv():
-        ms().select(["Stage/Screens/Centre"])
+        ms().select([K("Stage/Screens/Centre")])
         i = ms().uv_box.findData(1)
         ms().uv_box.setCurrentIndex(i)
         ms().uv_box.activated.emit(i)
-        check("UV set 2 on Centre", ms().assign.uv.get("Stage/Screens/Centre") == 1)
+        check("UV set 2 on Centre", ms().assign.uv.get(K("Stage/Screens/Centre")) == 1)
     add(s_uv, 300)
     add(lambda: space(ms().uv_box), 300)
 
@@ -1291,22 +1298,53 @@ def _mapping_check(app, win, stage: str, shot: str):
         for n in range(60):
             QTimer.singleShot(25 * n, lambda n=n: (ms().view.orbit(4, 1) if n % 3 == 0 else ms().view.pan(3, 1) if n % 3 == 1
                                                    else ms().view.zoom(0.2 if n < 30 else -0.2),
-                                                   ms().select(["Stage/Floor"] if n % 2 else [])))
+                                                   ms().select([K("Stage/Floor")] if n % 2 else [])))
     add(s_move, 2000)
     add(lambda: check("Plays through orbit/pan/zoom and selection (Space on UV selector)", not ms().view.paused, f"frame {ms().view.frame}"), 10)
+    parts = os.environ.get("NITPIX_SCREENSHOT_PARTS")
+    if parts:
+        files = sorted(os.path.join(parts, f) for f in os.listdir(parts) if f.lower().endswith((".obj", ".fbx")))
+        before = {}
+
+        def s_add():
+            v = ms().view
+            before.update(path=v.m.path, frame=v.frame, cam=(v.yaw, v.dist), uv=dict(ms().assign.uv), t=_time.monotonic())
+            ms().add_models(files)
+        add(s_add, 300)
+
+        def s_added():
+            v = ms().view
+            check(f"Added {len(files)} model files while playing: stage, assignments, camera, clip kept",
+                  len(ms().stage.sources) == 1 + len(files) and not v.paused and v.m.path == before["path"]
+                  and v.frame > before["frame"] and (v.yaw, v.dist) == before["cam"] and ms().assign.uv == before["uv"],
+                  f"{ms().scene_lab.text()}; frame {before['frame']} -> {v.frame} in {_time.monotonic() - before['t']:.2f} s")
+            ms().select([o.key for s in ms().stage.sources[1:] for o in s.objects])
+            ms().apply_selected()
+            ms().view.frame_all()
+        add(lambda: wait_import(s_added), 1200)
+
+        def s_remove():
+            win.grab().save(f"{base}-2-composed.png")
+            gone = ms().stage.sources[1]
+            n = len(ms().assign.uv)
+            ms().remove_source(gone.id)
+            check(f"Removed {gone.name} while playing: only its objects went", ms().stage.source(gone.id) is None
+                  and len(ms().assign.uv) == n - len(gone.objects) and not ms().view.paused, ms().scene_lab.text())
+        add(s_remove, 800)
     add(lambda: (ms().toggle_play() if not ms().view.paused else None, ms().playhead.scrub(100)), 800)
     add(lambda: ms().playhead.step(1), 600)
     add(lambda: (win.grab().save(f"{base}-2-mapped.png"), check("Paused, scrub to 100, step", ms().playhead.frame == ms().view.frame == 101,
                  f"frame {ms().playhead.frame}")), 10)
 
     def s_clip():
+        win._uv = dict(ms().assign.uv)
         other = next((c for c in clips if c != ms().asset["id"]), None)
         i = ms().media_box.findData(other)
         ms().media_box.setCurrentIndex(i)
         ms().media_box.activated.emit(i)
     add(lambda: ms().toggle_play(), 600)
     add(s_clip, 2500)
-    add(lambda: check("Clip changed while playing", ms().view.loaded and ms().asset["id"] != clips[0] and len(ms().assign.uv) == 2,
+    add(lambda: check("Clip changed while playing", ms().view.loaded and ms().asset["id"] != clips[0] and ms().assign.uv == win._uv,
                       f"{ms().asset['name']}, paused {ms().view.paused}, frame {ms().view.frame}"), 10)
     add(lambda: (ms().toggle_play() if not ms().view.paused else None), 500)
     add(lambda: (setattr(win, "_f", ms().playhead.frame), win.show_view("review")), 1500)
@@ -1324,7 +1362,7 @@ def _mapping_check(app, win, stage: str, shot: str):
     add(lambda: check("Close project: Mapping reset, nothing loaded", ms().scene is None and not loaded_players()), 10)
     add(lambda: (win.open_project(str(win._proj)), win.show_view("mapping")) if win._proj else None, 2000)
     add(lambda: check("Reopen project: Mapping has no stage (session only) and a clip", ms().scene is None and ms().view.loaded), 10)
-    add(lambda: (ms().import_scene(stage)), 300)
+    add(lambda: (ms().add_models([stage])), 300)
     add(lambda: wait_import(lambda: (ms().apply_all(), ms().toggle_play())), 1500)
 
     def s_quit():

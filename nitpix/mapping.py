@@ -1,5 +1,6 @@
 """Which objects of an imported stage show the current media, and through which of their own UV
-sets. One shared source for all of them. Pure data, no Qt: the Mapping screen edits it and the
+sets. One shared source for all of them. The stage is a NormalizedScene or a composed Stage
+(nitpix/stage.py); keys are whatever it calls its objects. Pure data, no Qt: the Mapping screen edits it and the
 view draws from it. Session only for now: nothing here is saved with the project.
 
 Rules:
@@ -111,6 +112,10 @@ class Assignments:
     def clear(self, keys):
         for k in keys:
             self.uv.pop(k, None)
+
+    def prune(self):
+        """Forget objects the stage no longer has (a model file taken off it)."""
+        self.uv = {k: s for k, s in self.uv.items() if self.object(k) is not None}
 
 
 def share(f: float) -> str:

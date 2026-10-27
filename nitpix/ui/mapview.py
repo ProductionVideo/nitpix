@@ -9,7 +9,9 @@ generations, decoder safeguards, rational frame maths, shutdown) with only the d
   (nitpix/ui/mpvrender.py), so camera input never waits on the video clock. Where that timing is
   not available the view renders the way the QC player does and says why.
 - Camera movement only repaints: no seek, decode, libmpv render or geometry upload. Geometry is
-  uploaded once per scene, one set of buffers per mesh, shared by its instances.
+  uploaded once, one set of buffers per mesh, shared by its instances. A stage that changes
+  (a model file added or removed, nitpix/stage.py) uploads only the new meshes and releases only
+  the ones that left; the rest stay on the GPU, and playback is not touched.
 - Unlit: a media surface shows the texture's values. Where the chosen UVs fall outside 0-1 (by
   more than UV_EDGE, nitpix/scene.py: within it the image's edge is sampled), and on objects
   with no media, the surface is neutral grey with a simple headlight so the shape reads.
@@ -138,7 +140,7 @@ class MappingView(MpvWidget):
         self.scene = None
         self.assigned = {}               # object key -> UV set
         self.selected = set()
-        self._meshes = {}                # geometry id -> _Mesh
+        self._meshes = {}                # geometry id -> (Geometry, _Mesh)
         self._scene_dirty = False
         self._world = {}                 # object key -> (QMatrix4x4, mirrored)
         # camera
@@ -168,18 +170,26 @@ class MappingView(MpvWidget):
         self.relay.prop.connect(self._on_video_params)
 
     # ---- scene -------------------------------------------------------------------------
-    def set_scene(self, scene):
-        """A NormalizedScene, or None. Buffers are (re)built at the next paint, with the context current."""
+    def set_scene(self, scene, frame=True):
+        """A NormalizedScene or Stage, or None; also after the same Stage gained or lost a model file.
+        Buffers for new geometry are built, and those for geometry that has gone released, at the next
+        paint, with the context current. `frame` False keeps the camera (adding to a stage)."""
         self.scene = scene
         self.assigned, self.selected = {}, set()
-        self._world = {}
+        old, self._world = self._world, {}
         if scene is not None:
             for o in scene.objects:
-                w = o.world
-                m = QMatrix4x4(*[w[c * 4 + r] for r in range(4) for c in range(4)])
-                self._world[o.key] = (m, m.determinant() < 0)
+                m = old.get(o.key)
+                if m is None or m[2] is not o:
+                    w = o.world
+                    q = QMatrix4x4(*[w[c * 4 + r] for r in range(4) for c in range(4)])
+                    m = (q, q.determinant() < 0, o)
+                self._world[o.key] = m
         self._scene_dirty = True
-        self.frame_all(reset=True)
+        if frame:
+            self.frame_all(reset=True)
+        else:
+            self.update()
 
     def set_assignments(self, assigned: dict, selected=()):
         self.assigned = dict(assigned)
@@ -333,15 +343,18 @@ class MappingView(MpvWidget):
             self._report("libmpv is not available, so Mapping cannot play media.")
 
     def _sync_scene(self):
+        """Meshes to match the scene: geometry already uploaded (the same object under the same id)
+        is kept; anything else is released or built."""
         if not self._scene_dirty or self.prog is None:
             return
-        for mesh in self._meshes.values():
-            mesh.destroy()
-        self._meshes = {}
-        if self.scene is not None:
+        want = self.scene.geometries if self.scene is not None else {}
+        for gid in [g for g, (geo, _m) in self._meshes.items() if want.get(g) is not geo]:
+            self._meshes.pop(gid)[1].destroy()
+        new = [(gid, g) for gid, g in want.items() if gid not in self._meshes]
+        if new:
             self.prog.bind()
-            for gid, g in self.scene.geometries.items():
-                self._meshes[gid] = _Mesh(g, self.prog)
+            for gid, g in new:
+                self._meshes[gid] = (g, _Mesh(g, self.prog))
         self._scene_dirty = False
 
     def paintGL(self):
@@ -357,8 +370,8 @@ class MappingView(MpvWidget):
         f.glEnable(GL_DEPTH_TEST)
         f.glClearColor(0.07, 0.07, 0.075, 1.0)
         f.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        self._sync_scene()                     # also releases the last meshes when the stage is emptied
         if self.prog is not None and self.scene is not None:
-            self._sync_scene()
             vp = self.view_projection(W, H)
             eye = self._eye()
             self.prog.bind()
@@ -369,7 +382,7 @@ class MappingView(MpvWidget):
             f.glActiveTexture(GL_TEXTURE0)
             f.glBindTexture(GL_TEXTURE_2D, self.fbo.texture() if self.fbo is not None else self._blank.textureId())
             for o in self.scene.objects:
-                model, mirrored = self._world[o.key]
+                model, mirrored, _o = self._world[o.key]
                 uv = self.assigned.get(o.key)
                 self.prog.setUniformValue("mvp", vp * model)
                 self.prog.setUniformValue("model", model)
@@ -380,6 +393,7 @@ class MappingView(MpvWidget):
                     mesh = self._meshes.get(gid)
                     if mesh is None:
                         continue
+                    mesh = mesh[1]
                     mesh.vao.bind()
                     mesh.use_uv(self.prog, uv)
                     self._draw(GL_TRIANGLES, mesh.count)
@@ -393,7 +407,7 @@ class MappingView(MpvWidget):
         self._due.stop()
         if self.context() is not None and self.isValid():
             self.makeCurrent()
-            for mesh in self._meshes.values():
+            for _g, mesh in self._meshes.values():
                 mesh.destroy()
             self._meshes = {}
             self.fbo = None
