@@ -57,7 +57,7 @@ SECTIONS = {
         ("Double-click", "Reveal an exported file in Finder"),
     ]),
     "settings": ("Settings", "Project and app preferences.", []),
-    "mapping": ("Mapping (experimental)", "The mapped clip on an imported stage, while it plays.", [
+    "mapping": ("Mapping", "The mapped clip on an imported stage, while it plays.", [
         ("Drag", "Orbit the stage"),
         ("Right-drag  ⇧-drag", "Pan"),
         ("Scroll  pinch", "Zoom"),

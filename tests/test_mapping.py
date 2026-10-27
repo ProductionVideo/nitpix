@@ -65,7 +65,8 @@ class Rules(unittest.TestCase):
 
     def test_objects_without_uvs_are_refused_not_given_coordinates(self):
         self.assertEqual(self.a.apply(["Stage/Truss"]), {"Stage/Truss": "no UVs"})
-        self.assertEqual(self.a.warning("Stage/Truss"), "no UVs: stays neutral")
+        self.assertIsNone(self.a.warning("Stage/Truss"))                    # nothing assigned, nothing to warn about
+        self.assertIn("No UVs", self.a.details("Stage/Truss"))
 
     def test_uv_sets_and_mixed_selections(self):
         a = self.a
@@ -84,10 +85,59 @@ class Rules(unittest.TestCase):
     def test_out_of_range_follows_the_chosen_uv_set(self):
         a = self.a
         self.assertTrue(a.outside("Stage/Spill"))                            # authored -0.1..1.1
-        self.assertEqual(a.warning("Stage/Spill"), "UVs outside the image: neutral there")
+        self.assertIsNone(a.warning("Stage/Spill"))                          # unassigned: details only
+        self.assertIn("U -0.1 to 1.1", a.details("Stage/Spill"))
+        a.apply(["Stage/Spill"])
+        self.assertEqual(a.warning("Stage/Spill"), "partly outside image (31% neutral)")   # 1 - (1/1.2)², not every triangle
         self.assertFalse(a.outside("Stage/Screens/Centre", 0))
         self.assertFalse(a.outside("Stage/Screens/Centre", 1))
         self.assertFalse(a.outside("Stage/Truss"))
+
+
+@unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
+class UVWarnings(unittest.TestCase):
+    """uvedge.fbx: warnings follow assignment and the UV set in use; export noise is no warning."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scene = load_scene(os.path.join(FIX, "uvedge.fbx"))
+
+    def setUp(self):
+        self.a = Assignments(self.scene)
+
+    def test_noise_at_the_edge_is_on_the_image(self):
+        self.a.apply(["Noise"])
+        self.assertFalse(self.a.outside("Noise"))
+        self.assertIsNone(self.a.warning("Noise"))
+
+    def test_assigned_objects_are_warned_with_the_share_shown_neutral(self):
+        a = self.a
+        a.apply(["Beyond", "Islands", "Tiles"])
+        self.assertEqual(a.warning("Beyond"), "partly outside image (<1% neutral)")
+        self.assertEqual(a.warning("Islands"), "partly outside image (50% neutral)")
+        self.assertEqual(a.warning("Tiles"), "partly outside image (88% neutral)")
+        d = a.details("Islands")
+        self.assertIn("U -0.8 to 1.7", d)
+        self.assertIn("up to 0.8 beyond the image", d)
+        self.assertIn("4 of 8 triangles", d)
+
+    def test_unassigned_tiled_object_is_not_a_problem(self):
+        self.assertTrue(self.a.outside("Tiles"))
+        self.assertIsNone(self.a.warning("Tiles"))
+        self.assertIn("U -1.69 to 2.74", self.a.details("Tiles"))
+
+    def test_the_uv_set_in_use_decides(self):
+        a = self.a
+        a.apply(["Sets"], 0)
+        self.assertEqual(a.warning("Sets"), "partly outside image (87% neutral)")      # tiled 0-4 x 0-2: 7/8
+        a.apply(["Sets"], 1)
+        self.assertIsNone(a.warning("Sets"))                                           # "Fit" is all on the image
+        self.assertTrue(a.outside("Sets", 0))                                          # the other set is still described
+        self.assertIn("all on the image", a.details("Sets"))
+
+    def test_shares_never_round_to_none_or_all(self):
+        from nitpix.mapping import share
+        self.assertEqual([share(x) for x in (0, 0.001, 0.5, 0.996, 1)], ["0%", "<1%", "50%", ">99%", "100%"])
 
 
 @unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
@@ -129,6 +179,66 @@ class Workspace(unittest.TestCase):
         self.assertTrue(pump(self.app, lambda: not self.ms.importer.busy and self.ms.import_btn.isEnabled(), 30))
         pump(self.app, timeout=0.05)
 
+    def test_empty_then_importing_then_objects(self):
+        ms = self.ms
+        self.assertEqual(ms.objects.currentIndex(), 0)                       # what to do next, with its own button
+        self.assertIn("Import an OBJ or FBX", ms.empty_lab.text())
+        self.assertTrue(ms.empty_import.isVisibleTo(ms))
+        self.assertFalse(ms.apply_btn.isEnabled())
+        self.assertFalse(ms.apply_btn.property("primary"))                   # no strong style on a button that cannot act
+        ms.import_scene(os.path.join(FIX, "stage.fbx"))
+        self.assertIn("Importing stage.fbx", ms.empty_lab.text())
+        self.assertTrue(ms.cancel_btn.isVisibleTo(ms))
+        self.assertTrue(pump(self.app, lambda: not ms.importer.busy and ms.import_btn.isEnabled(), 30))
+        pump(self.app, timeout=0.05)
+        self.assertEqual(ms.objects.currentIndex(), 1)
+        self.assertEqual(ms.all_btn.text(), "Apply to all 12 with UVs")
+
+    def test_a_scene_that_cannot_be_used_says_why_where_the_objects_would_be(self):
+        self.import_("garbage.fbx")
+        self.assertEqual(self.ms.objects.currentIndex(), 0)
+        self.assertIn("could not be used", self.ms.empty_lab.text())
+
+    def test_filter_keeps_selection_and_assignments(self):
+        ms = self.ms
+        self.import_("stage.fbx")
+        ms.select(["Stage/Floor"])
+        ms.filter.setText("scre")
+        shown = sorted(it.data(0, 0x0100) for it in ms._rows() if not ms._hidden(it))
+        self.assertEqual(shown, ["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"])   # by path, too
+        self.assertEqual(ms.selected_keys(), ["Stage/Floor"])               # still selected...
+        self.assertIn("1 hidden by the filter", ms.sel_lab.text())           # ...and it says so
+        ms.select_shown()
+        self.assertEqual(sorted(ms.selected_keys()), shown)
+        self.assertEqual(ms.apply_btn.text(), "Apply clip to 3 selected")
+        ms.apply_selected()
+        ms.filter.clear()
+        self.assertTrue(all(not ms._hidden(it) for it in ms._rows()))
+        self.assertEqual(sorted(ms.assign.uv), shown)
+        self.assertEqual(ms.clear_btn.text(), "Clear 3")
+
+    def test_inspector_names_the_clip_and_warns_for_the_selection(self):
+        ms = self.ms
+        self.import_("stage.fbx")
+        path = os.path.join(self.tmp, "real clip.mov")
+        open(path, "wb").close()                                             # present on disk; never decoded here
+        aid = self.session.project.upsert_asset(path, kind="video", name="real clip.mov", fps="25/1", frames=50, duration=2.0, scan_state="done")
+        ms.refresh_media()
+        ms._choose_media(aid)
+        self.assertEqual(ms.clip_lab.text(), "Clip: real clip.mov")
+        ms.select(["Stage/Spill"])
+        self.assertIn("about 31% of this surface would show neutral", ms.warn_lab.text())
+        self.assertFalse(ms.warn_lab.isHidden())
+        ms.apply_selected()
+        self.assertIn("shows neutral", ms.warn_lab.text())
+        self.assertIn("U -0.1 to 1.1", ms.warn_lab.toolTip())
+        rows = {it.data(0, 0x0100): it for it in ms._rows()}
+        self.assertEqual(rows["Stage/Spill"].text(1), "● UV 1 ⚠")
+        ms.select(["Stage/Screens/Centre"])
+        self.assertTrue(ms.warn_lab.isHidden())                              # nothing to say about a clean selection
+        ms.select(["Stage/Screens/Centre", "Stage/Spill", "Stage/Floor"])
+        self.assertIn("1 show the clip", ms.sel_lab.text())
+
     def test_media_list_offers_visual_media_only(self):
         self.ms.refresh_media()
         self.assertEqual([self.ms.media_box.itemText(i) for i in range(self.ms.media_box.count())], ["a.mov"])
@@ -139,8 +249,9 @@ class Workspace(unittest.TestCase):
         self.assertIsNotNone(ms.scene)
         rows = {it.data(0, 0x0100): it for it in ms._rows()}
         self.assertEqual(rows["Stage/Logo_A#2"].text(0), "Logo_A (2)")       # duplicates told apart
-        self.assertEqual(rows["Stage/Truss"].text(2), "no UVs: stays neutral")
-        self.assertEqual(rows["Stage/Spill"].text(2), "UVs outside the image: neutral there")
+        self.assertEqual(rows["Stage/Truss"].text(1), "no UVs")
+        self.assertEqual(rows["Stage/Spill"].text(1), "")                    # unassigned: no warning...
+        self.assertIn("U -0.1 to 1.1", rows["Stage/Spill"].toolTip(0))       # ...the numbers in its tooltip
         ms.select(["Stage/Screens/Centre", "Stage/Screens/Left", "Stage/Screens/Right"])
         self.assertTrue(ms.apply_btn.isEnabled())
         ms.apply_selected()
@@ -198,7 +309,7 @@ class Workspace(unittest.TestCase):
 
 @unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
 class OneSession(unittest.TestCase):
-    """MainWindow with Mapping enabled: one player has a file at a time; switching keeps frames."""
+    """MainWindow (release build unless stated): Mapping in the sidebar; one player has a file at a time; switching keeps frames."""
 
     @classmethod
     def setUpClass(cls):
@@ -209,7 +320,7 @@ class OneSession(unittest.TestCase):
         cls.app.setStyleSheet(theme.STYLESHEET)
         cls.tmp = tempfile.mkdtemp(prefix="nitpix mapping session ")
 
-    def window(self, experimental=True):
+    def window(self, experimental=False, legacy=None):
         from nitpix.ui.app import MainWindow
         if experimental:
             for name, value in (("IS_EXPERIMENTAL", True), ("VARIANT", "exp"), ("SETTINGS", ("nitpix-exp", "nitpix-exp"))):
@@ -217,7 +328,9 @@ class OneSession(unittest.TestCase):
                 p.start()
                 self.addCleanup(p.stop)
         from nitpix.ui.prefs import prefs
-        prefs().clear()                                                      # each test starts with Mapping off
+        prefs().clear()                                                      # fresh preferences...
+        if legacy is not None:
+            prefs().setValue("mapping/enabled", legacy)                      # ...or ones from when Mapping was a setting
         w = MainWindow(service.Session())
         self.addCleanup(lambda: (w.close(), w.deleteLater()))
         d = tempfile.mkdtemp(dir=self.tmp)
@@ -239,29 +352,62 @@ class OneSession(unittest.TestCase):
         player.target, player.loaded = path, True
         player.m.path = path
 
-    def test_release_build_has_no_mapping(self):
-        w = self.window(experimental=False)
-        self.assertNotIn("mapping", w.nav)
-        self.assertIsNone(w.mapping)
-        self.assertIsNone(w.settings_screen.mapping_box)
-        w.show_view("mapping")
-        self.assertEqual(w.current_view, "dashboard")
+    def nav_order(self, w):
+        lay = w.nav["review"].parentWidget().layout()
+        pos = {lay.indexOf(b): k for k, b in w.nav.items()}
+        return [pos[i] for i in sorted(pos)]
 
-    def test_off_by_default_then_enabled_from_settings(self):
-        w = self.window()
-        self.assertFalse(w.nav["mapping"].isVisibleTo(w))
-        self.assertIsNone(w.mapping)
-        w.settings_screen.refresh()
-        self.assertFalse(w.settings_screen.mapping_box.isChecked())
-        w.settings_screen.mapping_box.setChecked(True)
-        self.assertTrue(w.nav["mapping"].isVisibleTo(w))
-        self.assertIsNotNone(w.mapping)
+    def test_release_build_shows_mapping_beside_review(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
         from nitpix.ui.app import VIEWS
-        self.assertNotIn("mapping", VIEWS)                                   # 1-6 keep their screens
+        from nitpix.ui.shortcuts import SECTIONS
+        w = self.window()
+        w.show()
+        pump(self.app, timeout=0.05)
+        self.assertFalse(variant.IS_EXPERIMENTAL)
+        self.assertEqual(self.nav_order(w), ["dashboard", "media", "review", "mapping", "presets", "reports", "settings"])
+        self.assertTrue(all(b.isVisible() for b in w.nav.values()))
+        self.assertIsNone(w.mapping)                                         # nothing made until it is opened
+        w.nav["mapping"].click()
+        self.assertEqual(w.current_view, "mapping")
+        self.assertTrue(w.nav["mapping"].isChecked())
+        self.assertIsNotNone(w.mapping)
+        self.assertEqual(VIEWS, ["dashboard", "media", "review", "presets", "reports", "settings"])   # number keys unchanged
+        self.assertEqual(w.nav["presets"].toolTip(), "Specs (4)")
+        self.assertNotRegex(w.nav["mapping"].toolTip(), r"\(\d\)")
+        self.assertEqual(SECTIONS["mapping"][0], "Mapping")
+        w.dashboard.setFocus()
+        QTest.keyClick(w.dashboard, Qt.Key.Key_4)
+        self.assertEqual(w.current_view, "presets")
+        w.set_rail_collapsed(True)                                           # icon strip: same order, icon only
+        self.assertEqual((w.nav["mapping"].text(), w.nav["mapping"].icon().isNull()), ("", False))
+        w.set_rail_collapsed(False)
+        self.assertEqual(w.nav["mapping"].text(), "Mapping")
+        self.assertFalse(hasattr(w.settings_screen, "mapping_box"))          # no setting to find first
+
+    def test_an_old_mapping_off_preference_hides_nothing(self):
+        w = self.window(legacy=False)
+        self.assertTrue(w.nav["mapping"].isVisibleTo(w))
+        w.show_view("mapping")
+        self.assertEqual(w.current_view, "mapping")
+
+    def test_without_a_project_mapping_leads_to_the_start(self):
+        w = self.window()
+        w.close_project()
+        w.show_view("mapping")
+        self.assertEqual(w.current_view, "start")
+        self.assertIsNone(w.mapping)
+
+    def test_experimental_builds_have_it_too(self):
+        w = self.window(experimental=True)
+        self.assertEqual(self.nav_order(w)[3], "mapping")
+        w.show_view("mapping")
+        self.assertEqual(w.current_view, "mapping")
 
     def test_switching_hands_over_one_session_and_keeps_the_frame(self):
         w = self.window()
-        w.set_mapping_enabled(True)
+        w.ensure_mapping()
         rv, ms = w.review, w.mapping
         ms.view.m = FakeMpv()                                                # the libmpv stand-in for Mapping's player too
         w.show_asset(self.a)
@@ -289,7 +435,7 @@ class OneSession(unittest.TestCase):
 
     def test_changing_the_mapped_clip_and_leaving_via_another_screen(self):
         w = self.window()
-        w.set_mapping_enabled(True)
+        w.ensure_mapping()
         w.show_asset(self.a)
         w.show_view("mapping")
         ms = w.mapping
@@ -300,9 +446,34 @@ class OneSession(unittest.TestCase):
         w.show_view("review")                                                # QC then shows the mapped clip
         self.assertEqual(w.review.asset["id"], self.b)
 
+    def test_typing_in_the_filter_never_reaches_the_transport(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        w = self.window()
+        w.ensure_mapping()
+        w.show_asset(self.a)
+        w.show_view("mapping")
+        ms = w.mapping
+        ms._set_scene(load_scene(os.path.join(FIX, "stage.fbx")), "stage.fbx")
+        toggles = []
+        ms.toggle_play = lambda: toggles.append(1)
+        ms.view.frame_all = lambda *a, **k: toggles.append("f")
+        ms.filter.setFocus()
+        pump(self.app, timeout=0.05)
+        QTest.keyClicks(ms.filter, "f ")
+        QTest.keyClick(ms.filter, Qt.Key.Key_Left)
+        self.assertEqual((ms.filter.text(), toggles), ("f ", []))
+        QTest.keyClick(ms.filter, Qt.Key.Key_Escape)                         # clears and leaves the field
+        self.assertEqual(ms.filter.text(), "")
+        ms.tree.setFocus()
+        pump(self.app, timeout=0.05)
+        QTest.keyClick(ms.tree, Qt.Key.Key_Space)                            # elsewhere the keys still work
+        QTest.keyClick(ms.tree, Qt.Key.Key_F)
+        self.assertEqual(toggles, [1, "f"])
+
     def test_close_project_resets_mapping(self):
         w = self.window()
-        w.set_mapping_enabled(True)
+        w.ensure_mapping()
         w.show_view("mapping")
         w.mapping._set_scene(load_scene(os.path.join(FIX, "stage.obj")), "stage.obj")
         w.close_project()

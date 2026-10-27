@@ -232,6 +232,17 @@ class Updates(unittest.TestCase):
         from nitpix.ui.prefs import prefs
         self.assertEqual(Path(prefs().fileName()), Path(self.settings_dir, "nitpix", "nitpix.ini"))   # the test's INI, not the user's
 
+    def test_a_prefs_folder_keeps_a_packaged_check_away_from_the_real_store(self):
+        from nitpix.ui.prefs import prefs
+        d = tempfile.mkdtemp(prefix="nitpix prefs ")
+        with mock.patch.dict(os.environ, {"NITPIX_PREFS_DIR": d}):
+            st = prefs()
+            st.setValue("probe", 1)
+            st.sync()
+            self.assertEqual(Path(st.fileName()), Path(d, "nitpix.ini"))
+        self.assertTrue(Path(d, "nitpix.ini").exists())
+        shutil.rmtree(d, True)
+
     def test_every_preference_goes_through_the_variant(self):
         """No QSettings outside nitpix/ui/prefs.py, so nothing can reach the release's store from
         an experimental build by naming it directly."""

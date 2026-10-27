@@ -14,6 +14,7 @@ Blender --background --factory-startup --python tools/scenes/make_fixtures.py --
 | `stage.fbx` | Binary FBX 7.4 from Blender, in metres, Y up. `Logo_B` is renamed `Logo_A` after export, so there are two objects with one name |
 | `stage_cm_zup.fbx` | The same stage authored in centimetres and exported Z up |
 | `stage.obj` / `.mtl` | The same stage as OBJ (no hierarchy, no instances) |
+| `uvedge.fbx` | From `tools/scenes/make_uv_fixtures.py`: UVs within and just past the edge tolerance, out-of-range islands, tiled UVs, and an object whose two UV sets differ |
 | `edge.obj` / `.mtl` | Written as text: two objects named `Screen`, an object without UVs, a hexagon |
 | `truncated.fbx`, `garbage.fbx`, `truncated.obj` | Damaged files that must be refused with a readable error |
 | `expected.json` | Values taken from the Blender scene itself: object paths, triangles, material slots, UV sets, and every (position, UV) corner. UVs are exact float32 values; positions are in metres, Y up, to 1e-4 |
