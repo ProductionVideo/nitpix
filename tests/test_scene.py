@@ -203,18 +203,40 @@ class BadInput(unittest.TestCase):
         with self.assertRaisesRegex(SceneImportError, "cancelled"):
             load_scene(fx("stage.fbx"), cancel=stop)
 
-    def test_lines_and_points_are_explained(self):
-        """assimp-py 1.2 refuses a file with any line geometry; the user is told why and what to
-        do, for a lines-only file and for surfaces with a stray spline alike."""
+    def test_lines_and_points(self):
+        """assimp-py 1.2 refuses a file with any line geometry. An OBJ is read again without its
+        line and point statements (SketchUp writes every edge as one, Blender loose edges); a
+        file of lines alone has nothing to show media on. The source file is left as it was."""
         with tempfile.TemporaryDirectory() as d:
             for name, text in (("lines.obj", "o Wire\nv 0 0 0\nv 1 0 0\nv 1 1 0\nl 1 2 3\n"),
-                               ("mixed.obj", "o Screen\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\n"
-                                             "f 1/1 2/2 3/3\no Wire\nv 0 0 1\nv 1 0 1\nl 4 5\n")):
-                p = os.path.join(d, name)
-                with open(p, "w") as fh:
+                               ("mixed.obj", "mtllib mixed lib.mtl\no Screen\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\n"
+                                             "usemtl LED\nf 1/1 2/2 3/3\no Wire\nv 0 0 1\nv 1 0 1\nl 4 5\np 4\nl 1 4\n")):
+                with open(os.path.join(d, name), "w") as fh:
                     fh.write(text)
-                with self.subTest(name), self.assertRaisesRegex(SceneImportError, "lines or points"):
-                    load_scene(p)
+            with open(os.path.join(d, "mixed lib.mtl"), "w") as fh:
+                fh.write("newmtl LED\nKd 1 1 1\n")
+            with self.assertRaisesRegex(SceneImportError, "only lines or points"):
+                load_scene(os.path.join(d, "lines.obj"))
+            before = open(os.path.join(d, "mixed.obj")).read()
+            s = load_scene(os.path.join(d, "mixed.obj"))
+            self.assertEqual([(o.display, o.triangles, o.slots, o.uv_sets) for o in s.objects], [("Screen", 1, ("LED",), 1)])
+            self.assertIn("3 line or point elements ignored (only surfaces can show media).", s.warnings)
+            self.assertEqual(s.source["path"], os.path.join(d, "mixed.obj"))
+            self.assertEqual(open(os.path.join(d, "mixed.obj")).read(), before)
+
+    def test_empty_and_unexplained_failures_say_what_to_do(self):
+        with tempfile.TemporaryDirectory() as d:
+            empty = os.path.join(d, "empty.obj")
+            open(empty, "w").close()
+            with self.assertRaisesRegex(SceneImportError, r"empty \(0 bytes\)"):
+                load_scene(empty)
+            from nitpix.scene import _assimp_message
+            fbx = os.path.join(d, "new.fbx")
+            with open(fbx, "wb") as fh:
+                fh.write(b"Kaydara FBX Binary  \x00\x1a\x00" + (7700).to_bytes(4, "little") + bytes(64))
+            msg = _assimp_message(RuntimeError(f"Assimp error loading '{fbx}': "), fbx)
+            self.assertTrue(msg.startswith("the importer gave no reason (FBX 7.7). "), msg)
+            self.assertIn("export it again", msg)
 
     def test_no_surfaces(self):
         with tempfile.TemporaryDirectory() as d:
