@@ -235,7 +235,7 @@ class Session:
     def open(self, folder: str, name: str | None = None, defaults: dict | None = None) -> Project:
         """Open (or create) a project. `defaults` (nitpix/defaults.py) seed a project created now, once;
         an existing project is never changed by them. What could not be used is in self.seed_problems."""
-        folder = os.path.expanduser(folder)
+        folder = os.path.normpath(os.path.expanduser(folder))
         if not folder.endswith((".nitpix", ".lhsqc")):  # .lhsqc: projects from before the rename
             folder += ".nitpix"
         with self.lock:

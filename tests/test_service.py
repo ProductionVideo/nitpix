@@ -26,6 +26,20 @@ class ServiceTest(unittest.TestCase):
              "title": "Video codec", "detail": "", "measured": "prores", "expected": "prores", "why": "", "frame_in": None, "frame_out": None}])
         self.p.recompute_result(self.a)
 
+    def test_open_project_folder_with_trailing_separator_keeps_its_data(self):
+        folder = os.path.join(self.tmp, "retained.nitpix")
+        original = Project(folder)
+        original.update_settings({"project_name": "Retained stage", "reviewer": "Jo"})
+        original.set_meta("mapping.setup", {"sentinel": "retained"})
+        original.close()
+        session = service.Session()
+        self.addCleanup(session.close)
+        opened = session.open(folder + os.sep)
+        self.assertEqual(str(opened.folder), os.path.realpath(folder))
+        self.assertEqual(opened.settings["project_name"], "Retained stage")
+        self.assertEqual(opened.get_meta("mapping.setup"), {"sentinel": "retained"})
+        self.assertFalse(os.path.exists(os.path.join(folder, ".nitpix")))
+
     def test_list_and_detail(self):
         rows = service.list_assets(self.p)
         self.assertEqual([r["name"] for r in rows], ["a.mov", "b.mov"])
