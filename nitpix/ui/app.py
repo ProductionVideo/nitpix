@@ -1681,6 +1681,8 @@ def run(project: str | None = None) -> int:
         QTimer.singleShot(3000, win.check_updates)  # after the window is up; quiet unless there is news
     if project:
         win.open_project(project)
+        if os.environ.get("NITPIX_START_VIEW") in NAV and win.session.project:   # a launcher opening a demo on a screen
+            win.show_view(os.environ["NITPIX_START_VIEW"])
     if os.environ.get("NITPIX_STRESS") and win.session.project:  # verification: rapid asset switching
         _stress(app, win, int(os.environ["NITPIX_STRESS"]))
     shot = os.environ.get("NITPIX_SCREENSHOT")
