@@ -241,7 +241,9 @@ class ReviewScreen(QWidget):
         self.ctx = None
         self.focus_idx = -1
         self.order: list[int] = []   # asset ids, for prev/next
-        self.note_draft = None
+        self.note_draft = None       # the note being written: asset_id, frame, text, severity, range (id when editing)
+        self.note_drafts = {}        # unsaved notes left on other assets, by asset id
+        self._focus_note = False     # put the cursor in the note box on the next render (n, Edit)
         self.released = False        # the playback session is with another workspace (Mapping)
         self._save_frame = QTimer(self, singleShot=True, interval=1500)
         self._save_frame.timeout.connect(self._persist_frame)
@@ -443,7 +445,11 @@ class ReviewScreen(QWidget):
         self.playhead.begin(self.ctx.count, None if keep else start, new=not same)
         if not keep:
             self.focus_idx = -1
-            self.note_draft = None
+            if not prev or prev["id"] != a["id"]:     # another asset: an unsaved note waits for its own
+                if prev and self._has_text(self.note_draft):
+                    self.note_drafts[prev["id"]] = self.note_draft
+                    self.status.emit(f"Your unsaved note on {prev['name']} is kept until you go back to it.", False)
+                self.note_draft = self.note_drafts.pop(a["id"], None)
         self._render_header()
         self.timeline.set_asset(a, self.ctx)
         self.timeline.set_frame(self.frame)
@@ -803,22 +809,27 @@ class ReviewScreen(QWidget):
         if a.get("in_frame") is not None and a.get("out_frame") is not None:
             self.note_range = QCheckBox("in/out range")
             self.note_range.setToolTip("Attach the note to the whole in/out range instead of one frame")
-            self.note_range.setChecked(bool(d and d.get("frame_out") is not None))
+            self.note_range.setChecked(bool(d and (d.get("range") or d.get("frame_out") is not None)))
+            self.note_range.toggled.connect(lambda _on: self._note_edited())
             row.addWidget(self.note_range)
         self.note_sev = QComboBox()
         for k, l in (("info", "Info"), ("warning", "Warning"), ("issue", "Issue")):
             self.note_sev.addItem(l, k)
         if d:
             self.note_sev.setCurrentIndex(max(0, self.note_sev.findData(d.get("severity") or "info")))
+        self.note_sev.currentIndexChanged.connect(lambda _i: self._note_edited())
         row.addWidget(self.note_sev)
         fl.addLayout(row)
         old = getattr(self, "note_text", None)
+        typing, cursor = False, None
         if old is not None:
             try:
                 old.removeEventFilter(self)
+                typing, cursor = old.hasFocus(), old.textCursor().position()
             except RuntimeError:
                 pass  # already deleted with the previous notes pane
         self.note_text = QPlainTextEdit(d.get("text", "") if d else "")
+        self.note_text.textChanged.connect(self._note_edited)
         self.note_text.setPlaceholderText("What did you see? (⌘↩ to save)" if platform.system() == "Darwin" else "What did you see? (Ctrl+Enter to save)")
         self.note_text.setFixedHeight(64)
         self.note_text.installEventFilter(self)
@@ -849,7 +860,12 @@ class ReviewScreen(QWidget):
             lay.addWidget(self._note_row(n))
         lay.addStretch(1)
         self.notes_scroll.setWidget(box)
-        if d:
+        if typing and cursor is not None:              # a refresh while typing: carry on where the cursor was
+            c = self.note_text.textCursor()
+            c.setPosition(min(cursor, len(self.note_text.toPlainText())))
+            self.note_text.setTextCursor(c)
+        if (d and self._focus_note) or typing:
+            self._focus_note = False
             box_edit = self.note_text  # may be rebuilt before the timer fires
             QTimer.singleShot(0, lambda: isValid(box_edit) and box_edit.setFocus())
 
@@ -879,13 +895,31 @@ class ReviewScreen(QWidget):
         return f
 
     def start_note(self):
-        self.note_draft = {"frame": self.frame}
+        if not self._has_text(self.note_draft):
+            self.note_draft = {"asset_id": self.asset["id"], "frame": self.frame}
+        self._focus_note = True
         self.tabs.setCurrentIndex(1)
         self._render_notes()
 
     def _edit_note(self, n):
         self.note_draft = dict(n)
+        self._focus_note = True
         self._render_notes()
+
+    @staticmethod
+    def _has_text(d) -> bool:
+        return bool(d and (d.get("text") or "").strip())
+
+    def _note_edited(self):
+        """What is typed or chosen in the note form, kept in the draft so a pane rebuild can't lose it."""
+        try:
+            text, sev = self.note_text.toPlainText(), self.note_sev.currentData()
+            rng = self.note_range is not None and self.note_range.isChecked()
+        except RuntimeError:
+            return
+        if self.note_draft is None:                   # typing straight into New note: it belongs to this frame
+            self.note_draft = {"asset_id": self.asset["id"], "frame": self.frame}
+        self.note_draft.update(text=text, severity=sev, range=rng)
 
     def _cancel_note(self):
         self.note_draft = None
@@ -896,17 +930,36 @@ class ReviewScreen(QWidget):
         if not text:
             self.status.emit("Write something first", True)
             return
-        a, d = self.asset, self.note_draft or {"frame": self.frame}
-        rng = self.note_range is not None and self.note_range.isChecked()
-        frame, frame_out = (a["in_frame"], a["out_frame"]) if rng else (d["frame"], None)
-        p = self.session.project
-        if d.get("id"):
-            service.update_note(p, d["id"], text=text, severity=self.note_sev.currentData(), frame=frame, frame_out=frame_out, kind="note")
-        else:
-            service.add_note(p, a["id"], "note", frame, frame_out, self.note_sev.currentData(), text)
+        self._note_edited()
+        self._write_note(self.note_draft)
         self.note_draft = None
         self.player.osd("Note saved")
         self.refresh()
+
+    def _write_note(self, d: dict):
+        """A draft saved to the asset and frame it was started on (not whichever is showing now)."""
+        p = self.session.project
+        a = service.asset_detail(p, d["asset_id"]) if d.get("asset_id") else self.asset
+        if not a:
+            return
+        rng = d.get("range") and a.get("in_frame") is not None and a.get("out_frame") is not None
+        frame, frame_out = (a["in_frame"], a["out_frame"]) if rng else (d["frame"], None)
+        text, sev = d["text"].strip(), d.get("severity") or "info"
+        if d.get("id"):
+            service.update_note(p, d["id"], text=text, severity=sev, frame=frame, frame_out=frame_out, kind="note")
+        else:
+            service.add_note(p, a["id"], "note", frame, frame_out, sev, text)
+
+    def unsaved_notes(self) -> list[dict]:
+        return [d for d in [self.note_draft, *self.note_drafts.values()] if self._has_text(d)]
+
+    def settle_notes(self, choice: str):
+        """"save" writes every unsaved note to its own asset; "discard" drops them."""
+        if choice == "save":
+            for d in self.unsaved_notes():
+                self._write_note(d)
+        self.note_draft = None
+        self.note_drafts.clear()
 
     def _delete_note(self, n):
         if QMessageBox.question(self, "Delete note", "Delete this note?") == QMessageBox.StandardButton.Yes:

@@ -902,7 +902,15 @@ class MainWindow(QMainWindow):
         return False
 
     def drafts_released(self, action: str) -> bool:
-        """Unsaved edits in Specs and Settings settled (saved, dropped) before the project goes; False keeps it open."""
+        """Unsaved review notes and edits in Specs and Settings settled (saved, dropped) before the project goes;
+        False keeps it open."""
+        notes = self.review.unsaved_notes()
+        if notes:
+            n = len(notes)
+            choice = self.ask_unsaved("notes", f"{n} review note{'s' if n > 1 else ''} not saved yet.", action)
+            if choice == "cancel":
+                return False
+            self.review.settle_notes(choice)
         return self.presets.settle(action) and self.settings_screen.settle(action)
 
     def ask_unsaved(self, what: str, text: str, action: str) -> str:

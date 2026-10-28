@@ -226,6 +226,39 @@ class Screens(unittest.TestCase):
         self.assertEqual((n["frame"], n["severity"], n["text"]), (42, "issue", "soft focus"))
         self.assertEqual(rv.asset["qc_result"], "fail")
 
+    def test_note_drafts_survive_refreshes_and_stay_with_their_frame(self):
+        from unittest import mock
+        w, rv = self.win, self.win.review
+        w.show_asset(self.aid)
+        rv.seek(42)
+        rv.start_note()
+        rv.note_text.setPlainText("soft focus on the left")
+        rv.note_sev.setCurrentIndex(rv.note_sev.findData("warning"))
+        rv.refresh()                                                             # e.g. a scan finishing while typing
+        self.assertEqual((rv.note_text.toPlainText(), rv.note_sev.currentData()), ("soft focus on the left", "warning"))
+        rv.seek(80)
+        w.show_asset(self.bid)                                                   # another clip: the draft waits
+        self.assertEqual(rv.note_text.toPlainText(), "")
+        rv.seek(5)
+        rv.note_text.setPlainText("hum under the dialogue")                      # typed straight into New note
+        rv.refresh()
+        self.assertEqual(rv.note_text.toPlainText(), "hum under the dialogue")
+        w.show_asset(self.aid)
+        self.assertEqual(rv.note_text.toPlainText(), "soft focus on the left")
+        rv.save_note()
+        n = rv.asset["notes"][0]
+        self.assertEqual((n["frame"], n["severity"], n["text"]), (42, "warning", "soft focus on the left"))
+        self.assertEqual(rv.unsaved_notes()[0]["text"], "hum under the dialogue")
+        with mock.patch.object(w, "ask_unsaved", return_value="cancel"):         # cancel: the project stays, so does the note
+            self.assertFalse(w.close_project())
+        self.assertEqual(len(rv.unsaved_notes()), 1)
+        p = w.session.project
+        with mock.patch.object(w, "ask_unsaved", return_value="save"):
+            self.assertTrue(w.close_project())
+        w.open_project(str(p.folder))
+        notes = service.asset_detail(w.session.project, self.bid)["notes"]
+        self.assertEqual([(x["frame"], x["text"]) for x in notes], [(5, "hum under the dialogue")])
+
     def test_delivery_specs_are_called_specs(self):
         """Renamed from "presets" in 0.5.5: the words people see, not the stored ids."""
         from nitpix.ui.app import VIEW_LABEL
