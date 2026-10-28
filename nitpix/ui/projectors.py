@@ -208,6 +208,11 @@ class ProjectorPanel(QWidget):
         for c in range(1, 4):
             grid.setColumnStretch(c, 1)
         pl.addLayout(grid)
+        drag = QLabel("Drag a Body or Target number sideways to adjust it; click it to type.")
+        drag.setProperty("faint", True)
+        drag.setWordWrap(True)
+        drag.setToolTip("Shift: fine. ⌘/Ctrl: coarse. Esc cancels a drag; each drag is one Undo.")
+        pl.addWidget(drag)
 
         pl.addWidget(_head("Image"))
         img = QGridLayout()
@@ -237,7 +242,7 @@ class ProjectorPanel(QWidget):
             sp.valueChanged.connect(lambda _v: self.changed.emit({"raster": (self.rw.value(), self.rh.value()), "raster_note": ""},
                                                                  "Native raster"))
             sp.done.connect(self.done_editing.emit)
-        px = QLabel("W × H px")
+        px = self.px_lab = QLabel("W × H px")              # shown for Custom: a listed raster says its size
         px.setProperty("faint", True)
         img.addWidget(px, 2, 0)
         img.addWidget(self.rw, 2, 1)
@@ -279,7 +284,7 @@ class ProjectorPanel(QWidget):
         vr.addWidget(self.frame_btn, 1)
         pl.addLayout(vr)
         checks = QHBoxLayout()
-        checks.setSpacing(10)
+        checks.setSpacing(20)
         self.enabled = QCheckBox("Projection")
         self.enabled.setToolTip("Off: the stage shows neutral grey, and the projector's settings are kept.")
         self.enabled.toggled.connect(lambda on: self.changed.emit({"enabled": on}, "Show projection" if on else "Hide projection"))
@@ -308,10 +313,15 @@ class ProjectorPanel(QWidget):
     def _raster_chosen(self, _i):
         r = self.raster_box.currentData()
         if not r:                                      # Custom: type the numbers
+            self._show_custom(True)
             self.rw.setFocus()
             self.rw.selectAll()
             return
         self.changed.emit({"raster": tuple(int(n) for n in r.split("x")), "raster_note": ""}, "Native raster")
+
+    def _show_custom(self, on):
+        for w in (self.px_lab, self.rw, self.rh):
+            w.setVisible(on)
 
     def show_state(self, has_stage, projector, info):
         """Fill the panel from the state (signals held back: this is not an edit). `info`: centre-ray
@@ -342,6 +352,7 @@ class ProjectorPanel(QWidget):
         self.rh.setValue(p.raster[1])
         i = self.raster_box.findData(f"{p.raster[0]}x{p.raster[1]}")
         self.raster_box.setCurrentIndex(i if i >= 0 and not p.raster_note else self.raster_box.count() - 1)
+        self._show_custom(self.raster_box.currentIndex() == self.raster_box.count() - 1)
         self.fit_box.setCurrentIndex(max(0, self.fit_box.findData(p.fit)))
         for w in widgets:
             w.blockSignals(False)

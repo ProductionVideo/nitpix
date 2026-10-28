@@ -269,16 +269,17 @@ class MappingScreen(QWidget):
         info = QHBoxLayout()
         info.setContentsMargins(0, 4, 12, 4)
         info.setSpacing(10)
-        self.tex_lab = ElideLabel("")
+        self.tex_lab = QLabel("")                             # short: the size is never elided away
         self.tex_lab.setFont(theme.mono(11))
         self.tex_lab.setProperty("muted", True)
         self.mode_lab = QLabel()                              # what the view is showing: says the tab
         self.mode_lab.setProperty("muted", True)
         info.addWidget(self.mode_lab)
-        info.addWidget(self.tex_lab, 1)
+        info.addWidget(self.tex_lab)
         self.hint_lab = ElideLabel(CAMERA_HINT)               # until the camera is first moved this session
         self.hint_lab.setProperty("faint", True)
-        info.addWidget(self.hint_lab, 2)
+        self.hint_lab.setToolTip(CAMERA_HINT)
+        info.addWidget(self.hint_lab, 1)
         self.reset_view_btn = btn("Reset view", "Front perspective view, whole stage", lambda: self.frame_all(reset=True))
         info.addWidget(self.reset_view_btn)
         ll.addLayout(info)
@@ -413,7 +414,8 @@ class MappingScreen(QWidget):
         il.addWidget(self.warn_lab)
         acts = QHBoxLayout()
         self.apply_btn = btn("Apply clip", "Show the clip on the selected objects", self.apply_selected)
-        self.clear_btn = btn("Clear", "Return the selected objects to neutral grey", self.clear_selected)
+        self.clear_btn = btn("Clear clip", "Take the clip off the selected objects: they show neutral grey. "
+                             "The objects stay on the stage; Remove takes a whole model file off.", self.clear_selected)
         acts.addWidget(self.apply_btn, 1)
         acts.addWidget(self.clear_btn)
         il.addLayout(acts)
@@ -445,7 +447,7 @@ class MappingScreen(QWidget):
         self.side_split.addWidget(self.inspectors)
         self.side_split.setCollapsible(0, False)
         self.side_split.setCollapsible(1, False)
-        self._side_sizes = {0: [520, 200], 1: [200, 520]}      # list / inspector, per tab, as last left
+        self._side_sizes = {0: [520, 200], 1: [150, 570]}      # list / inspector, per tab, as last left
         sl.addWidget(self.side_split, 1)
         self.tabs.currentChanged.connect(self._on_tab)
         p = self.proj_panel
@@ -752,9 +754,10 @@ class MappingScreen(QWidget):
             self.tex_lab.setText("")
             return
         tw, th, sw, sh = t
-        self.tex_lab.setText(f"Texture {tw}×{th}" if (tw, th) == (sw, sh) else f"Preview {tw}×{th} of {sw}×{sh}")
-        self.tex_lab.setToolTip("" if (tw, th) == (sw, sh) else
-                                f"Media over {MAX_TEXTURE} px is downscaled here; QC shows it full size.")
+        self.tex_lab.setText(f"{tw}×{th}" if (tw, th) == (sw, sh) else f"{tw}×{th} of {sw}×{sh}")
+        self.tex_lab.setToolTip(f"Video texture {tw}×{th} px, the clip's own size." if (tw, th) == (sw, sh) else
+                                f"Video texture {tw}×{th} px of the clip's {sw}×{sh}: media over {MAX_TEXTURE} px is "
+                                "downscaled here; QC shows it full size.")
 
     def _on_problem(self, text):
         self.problem_lab.setText(f"Mapping: {text}")
@@ -1400,7 +1403,9 @@ class MappingScreen(QWidget):
         if bool(self.apply_btn.property("primary")) != bool(apply_n):
             self.apply_btn.setProperty("primary", bool(apply_n))     # the strong style only when it can act
             repolish(self.apply_btn)
-        self.clear_btn.setText(f"Clear {clear_n}" if clear_n else "Clear")
+        self.clear_btn.setToolTip(f"Take the clip off {clear_n} selected object{'s' if clear_n != 1 else ''}: they show neutral "
+                                  "grey. The objects stay on the stage; Remove takes a whole model file off." if clear_n else
+                                  "Select objects showing the clip to take it off them (they stay on the stage).")
         self.clear_btn.setEnabled(bool(clear_n))
         self.uv_box.setEnabled(self.uv_box.count() > 0)
         n_all = sum(1 for o in a.scene.objects if o.uv_sets) if a else 0
@@ -1718,7 +1723,10 @@ class MappingScreen(QWidget):
         if shown is not None:
             pp = self.view.projection
             info["vis"] = visibility_size(shown.aspect, (pp.limit if pp is not None and pp.limit else 16384))
+        page = self.proj_panel.pages.currentIndex()
         self.proj_panel.show_state(bool(self.stage), shown, info)
+        if self.proj_panel.pages.currentIndex() != page:      # e.g. removed: the next action at the top, not scrolled away
+            self.proj_scroll.verticalScrollBar().setValue(0)
         self._tool_state()
 
     # ---- keyboard ------------------------------------------------------------------------------

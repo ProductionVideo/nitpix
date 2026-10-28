@@ -379,6 +379,19 @@ class Screens(unittest.TestCase):
         w.show_view("dashboard")
         self.assertFalse(w.dashboard.unchecked.isVisibleTo(w.dashboard))
 
+    def test_media_says_why_the_list_is_empty_and_resets_filters(self):
+        w, m = self.win, self.win.media
+        w.show_view("media")
+        self.assertEqual((m.summary.text(), m.empty_lab.isVisibleTo(m), m.clear_filters_btn.isVisibleTo(m)), ("2 assets", False, False))
+        m.search.setText("nothing like this")
+        self.assertEqual(m.summary.text(), "0 of 2 assets")
+        self.assertTrue(m.empty_lab.isVisibleTo(m) and m.clear_filters_btn.isVisibleTo(m))
+        self.assertIn("No assets match", m.empty_lab.text())
+        m.f_result.setCurrentIndex(m.f_result.findData("fail"))
+        m.clear_filters_btn.click()
+        self.assertEqual((m.search.text(), m.f_result.currentIndex(), m.summary.text()), ("", 0, "2 assets"))
+        self.assertFalse(m.empty_lab.isVisibleTo(m))
+
     def test_review_screen_stays_narrow(self):
         # a very long name and path must elide, not force the window wider than a laptop screen
         p = self.win.session.project

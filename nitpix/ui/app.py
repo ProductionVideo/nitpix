@@ -479,6 +479,11 @@ class SettingsScreen(QWidget):
         form.addRow("iina-cli path", self.iina_cli)
         form.addRow("Socket mode", self.iina_mode)
         form.addRow("Fixed socket path", self.iina_sock)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)   # names and paths get room
+        for w in (self.name, self.client, self.reviewer, self.preset, self.iina_cli, self.iina_mode, self.iina_sock):
+            w.setMaximumWidth(640)
+        for w in (self.workers, self.max_secs):
+            w.setMaximumWidth(140)
         self.tools = QLabel()
         self.tools.setProperty("muted", True)
         self.tools.setWordWrap(True)
@@ -506,8 +511,11 @@ class SettingsScreen(QWidget):
             note.setProperty("muted", True)
             form.addRow("", note)
         row = QHBoxLayout()
-        row.addWidget(btn("Save settings", "", self.save, primary=True))
-        row.addStretch(1)
+        row.addWidget(btn("Save settings", "Saves these settings in this project only", self.save, primary=True))
+        scope = QLabel("Applies to this project. To start new projects with them, use New projects below.")
+        scope.setProperty("faint", True)
+        scope.setWordWrap(True)
+        row.addWidget(scope, 1)
         form.addRow(row)
         form.addRow(QLabel("<b>New projects</b>"))
         self.defaults_lab = QLabel()

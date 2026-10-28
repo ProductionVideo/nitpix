@@ -189,10 +189,24 @@ class MediaScreen(QWidget):
         self.table.customContextMenuRequested.connect(self._menu)
         self.table.doubleClicked.connect(lambda ix: self.open_asset.emit(self.proxy.data(ix, Qt.ItemDataRole.UserRole)["id"]))
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.empty_lab = QLabel()                    # why the list is empty, and what to do
+        self.empty_lab.setProperty("muted", True)
+        self.empty_lab.setWordWrap(True)
+        self.empty_lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_lab.setContentsMargins(0, 18, 0, 18)
+        self.empty_lab.hide()
+        lay.addWidget(self.empty_lab)
         lay.addWidget(self.table, 1)
+        srow = QHBoxLayout()
         self.summary = QLabel()
         self.summary.setProperty("muted", True)
-        lay.addWidget(self.summary)
+        srow.addWidget(self.summary)
+        self.clear_filters_btn = QPushButton("Clear search and filters")
+        self.clear_filters_btn.setToolTip("Show every asset again")
+        self.clear_filters_btn.clicked.connect(self.clear_filters)
+        srow.addWidget(self.clear_filters_btn)
+        srow.addStretch(1)
+        lay.addLayout(srow)
 
     def set_rows(self, rows, check_hits=None):
         sel = self.selected_ids()
@@ -224,9 +238,31 @@ class MediaScreen(QWidget):
         self.proxy.invalidateFilter()
         self._summary()
 
+    def filtering(self) -> bool:
+        return bool(self.search.text().strip() or self.f_result.currentIndex() or self.f_kind.currentIndex()
+                    or self.f_review.currentIndex() or self.f_det.isChecked())
+
+    def clear_filters(self):
+        for w in (self.search, self.f_result, self.f_kind, self.f_review, self.f_det):
+            w.blockSignals(True)
+        self.search.clear()
+        for box in (self.f_result, self.f_kind, self.f_review):
+            box.setCurrentIndex(0)
+        self.f_det.setChecked(False)
+        for w in (self.search, self.f_result, self.f_kind, self.f_review, self.f_det):
+            w.blockSignals(False)
+        self._filters()
+
     def _summary(self):
         n, total = self.proxy.rowCount(), self.model.rowCount()
-        self.summary.setText(f"{n} of {total} assets" if n != total else f"{total} assets")
+        noun = lambda k: f"{k} asset" + ("" if k == 1 else "s")
+        self.summary.setText(f"{n} of {noun(total)}" if n != total else noun(total))
+        self.clear_filters_btn.setVisible(self.filtering())
+        if not total:
+            self.empty_lab.setText("No media in this project yet. Use + Add media, or drop files or folders on the window.")
+        elif not n:
+            self.empty_lab.setText("No assets match the search and filters. Clear them to see every asset.")
+        self.empty_lab.setVisible(not n)
 
     def _menu(self, pos):
         ids = self.selected_ids()

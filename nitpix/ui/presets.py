@@ -545,6 +545,7 @@ class PresetsScreen(QWidget):
         locked = bool(pr.get("builtin")) and not self._editable_default(pr)
         active = pr["id"] == self.data["active"]
         self.title.setText(pr["name"])
+        self.title.setToolTip(pr["name"])
         self.active_chip.setVisible(active)
         self.use_btn.setVisible(not active)
         self.save_btn.setVisible(not locked)

@@ -261,7 +261,8 @@ class Workspace(_Screen):
         ms.filter.clear()
         self.assertTrue(all(not ms._hidden(it) for it in ms._rows()))
         self.assertEqual(sorted(ms.assign.uv), shown)
-        self.assertEqual(ms.clear_btn.text(), "Clear 3")
+        self.assertEqual(ms.clear_btn.text(), "Clear clip")
+        self.assertIn("off 3 selected objects", ms.clear_btn.toolTip())
 
     def test_inspector_names_the_clip_and_warns_for_the_selection(self):
         ms = self.ms
@@ -856,6 +857,25 @@ class ProjectorsTab(_Screen):
         self.assertTrue(all(p == positions[0] for p in positions))
         reset = ms.reset_view_btn
         self.assertGreaterEqual(reset.parentWidget().width() - reset.geometry().right(), 12)
+
+    def test_removing_the_projector_shows_add_without_scrolling(self):
+        ms = self.ms
+        ms.resize(1040, 640)
+        ms.activate()
+        self.import_(os.path.join(FIX, "projector", "projection.obj"))
+        ms.tabs.setCurrentIndex(1)
+        ms.add_projector()
+        pump(self.app, timeout=0.05)
+        panel = ms.proj_panel
+        self.assertTrue(panel.rw.isHidden())                                  # 1920 × 1080 is listed: W × H is for Custom
+        panel.raster_box.setCurrentIndex(panel.raster_box.count() - 1)
+        panel._raster_chosen(0)
+        self.assertFalse(panel.rw.isHidden())
+        bar = ms.proj_scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())                                           # scrolled down to Remove projector
+        ms.remove_projector()
+        pump(self.app, timeout=0.05)
+        self.assertEqual((ms.proj_panel.pages.currentIndex(), bar.value()), (1, 0))
 
     def test_number_drag_previews_commits_once_and_escape_cancels(self):
         from PySide6.QtCore import QEvent, QPointF, Qt
