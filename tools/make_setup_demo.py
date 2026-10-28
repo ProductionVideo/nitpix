@@ -25,6 +25,8 @@ import subprocess
 import sys
 import time
 
+if len(sys.argv) == 2:                          # never the user's own recent-projects list
+    os.environ.setdefault("NITPIX_STATE_DIR", os.path.join(os.path.abspath(sys.argv[1]), ".generator-state"))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from nitpix import mapsave, models, service  # noqa: E402
 from nitpix.projector import Projector  # noqa: E402
