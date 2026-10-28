@@ -1381,7 +1381,9 @@ def _mapping_check(app, win, stage: str, shot: str):
     separately exported screen models to add to the stage while it plays (and then remove one).
     Ends by closing the window while Mapping plays."""
     import time as _time
+    from PySide6.QtCore import QPoint
     from PySide6.QtGui import QKeyEvent
+    from PySide6.QtTest import QTest
     base = os.path.splitext(shot)[0]
     results, errors, gaps = [], [], [0.0]
     tick = {"t": _time.monotonic()}
@@ -1513,14 +1515,14 @@ def _mapping_check(app, win, stage: str, shot: str):
         p = ms().proj_panel
         for spin, val in zip(p.pos + p.tgt, (0.0, 2.5, 9.0, 0.0, 2.0, 0.0)):
             spin.setValue(val)
-        p.fov.setValue(35.0)
+        p.throw.setValue(1.5)
     add(s_projectors, 1200)
 
     def s_projected():
         v = ms().view
         pr = ms().projector
         check("Projectors tab: projector added and set while playing; same clip, still playing",
-              v.mode == "projectors" and v.projecting() and pr.position == (0.0, 2.5, 9.0) and pr.h_fov == 35.0
+              v.mode == "projectors" and v.projecting() and pr.position == (0.0, 2.5, 9.0) and pr.throw == 1.5
               and v.m.path == pj["path"] and not v.paused and v.frame > pj["frame"] and v.projection.rebuilds >= 1,
               f"{ms().proj_panel.info.text().splitlines()[0]}; visibility built {v.projection.rebuilds}x")
         win.grab().save(f"{base}-4-projector.png")
@@ -1529,14 +1531,21 @@ def _mapping_check(app, win, stage: str, shot: str):
 
     def s_through():
         win.grab().save(f"{base}-5-through.png")
-        n = ms().view.projection.rebuilds
-        for i in range(30):
-            QTimer.singleShot(20 * i, lambda: ms().view.orbit(3, 0.5))
-        pj.update(rebuilds=n)
+        v = ms().view
+        n = v.projection.rebuilds
+        pj.update(rebuilds=n, cam=(v.yaw, v.pitch, v.dist))
+        c = v.rect().center()
+        for i in range(10):                                     # a drag while looking through: locked
+            QTimer.singleShot(20 * i, lambda i=i: QTest.mouseMove(v, c + QPoint(i * 6, 0)))
+        QTest.mousePress(v, Qt.MouseButton.LeftButton, pos=c)
+        QTimer.singleShot(240, lambda: (QTest.mouseRelease(v, Qt.MouseButton.LeftButton, pos=c + QPoint(54, 0)),
+                                        QTest.keyClick(v, Qt.Key.Key_Escape)))
     add(s_through, 1000)
-    add(lambda: check("Look through, then orbit: back to the orbit view, visibility reused",
-                      not ms().view.looking_through and ms().view.projection.rebuilds == pj["rebuilds"],
-                      f"built {ms().view.projection.rebuilds}x"), 10)
+    add(lambda: check("Look through: dragging moves nothing; Esc exits to the exact orbit view, visibility reused",
+                      not ms().view.looking_through and (ms().view.yaw, ms().view.pitch, ms().view.dist) == pj["cam"]
+                      and ms().view.projection.rebuilds == pj["rebuilds"], f"built {ms().view.projection.rebuilds}x"), 400)
+    for i in range(30):
+        add(lambda: ms().view.orbit(3, 0.5), 20)
 
     def s_spin():
         spin = ms().proj_panel.pos[0]
@@ -1679,7 +1688,10 @@ def run(project: str | None = None) -> int:
         aid = os.environ.get("NITPIX_SCREENSHOT_ASSET")
         if aid and win.session.project:
             QTimer.singleShot(1500, lambda: win.show_asset(int(aid)))
-        if os.environ.get("NITPIX_SCREENSHOT_RESTORE") and win.session.project:
+        if os.environ.get("NITPIX_SCREENSHOT_SETUP") and win.session.project:
+            from .setupcheck import run as setup_check
+            setup_check(app, win, shot)
+        elif os.environ.get("NITPIX_SCREENSHOT_RESTORE") and win.session.project:
             _restore_check(app, win, shot)
         elif os.environ.get("NITPIX_SCREENSHOT_STAGE") and win.session.project:
             _mapping_check(app, win, os.environ["NITPIX_SCREENSHOT_STAGE"], shot)

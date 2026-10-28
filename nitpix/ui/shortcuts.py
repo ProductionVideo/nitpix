@@ -66,6 +66,9 @@ SECTIONS = {
         ("← →  ⇧← ⇧→", "Step one frame / one second"),
         ("Home  End", "First / last frame"),
         (f"{MOD}-click  ⇧-click", "Select several objects in the list"),
+        ("Drag an arrow", "Projectors: move the projector along X, Y or Z"),
+        ("Esc", "Projectors: cancel picking or a drag; leave look-through"),
+        (f"{MOD}Z  ⇧{MOD}Z", "Projectors: undo / redo a projector edit"),
     ]),
 }
 EVERYWHERE = ("Everywhere", "", [

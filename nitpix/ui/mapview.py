@@ -21,7 +21,16 @@ generations, decoder safeguards, rational frame maths, shutdown) with only the d
   UVs (above); mode "projectors" ignores UVs and assignments and casts the picture from one
   virtual projector (nitpix/projector.py) onto every surface, with occlusion
   (nitpix/ui/projection.py). A surface is lit on its front side (by winding) only, when that side
-  faces the projector: single-sided, like the media in surfaces mode. Switching mode only repaints.
+  faces the projector: single-sided, like the media in surfaces mode. The clip sits in the
+  projector's raster as its content fit says; bars outside it light nothing. An optional framing
+  grid is drawn in the projected image. Switching mode only repaints.
+- Camera: an orbit camera in perspective, or orthographic Front (from +Z), Side (from +X) and Top
+  (from +Y, upstage at the top). Orbiting from an orthographic view returns to perspective; pan
+  and zoom keep it. Looking through the projector locks navigation until it is left (exit()
+  restores the camera exactly), so an innocent scroll never jumps to another view.
+- Editing (nitpix/ui/projedit.py): a tool object, if set, sees mouse presses, moves and releases
+  first; what it does not take is navigation. Its helpers (projector body, target, move arrows,
+  pick marker; nitpix/ui/helpers.py) are drawn over the stage and take no part in it.
 
 GL objects are created and destroyed with this widget's context current, on the GUI thread;
 shutdown() releases them before the render context and the core.
@@ -31,15 +40,19 @@ from __future__ import annotations
 import math
 import time
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QMatrix4x4, QVector3D
+from PySide6.QtCore import QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QMatrix4x4, QVector3D, QVector4D
 from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLFramebufferObject, QOpenGLFramebufferObjectFormat, QOpenGLShader,
                               QOpenGLShaderProgram, QOpenGLTexture, QOpenGLVertexArrayObject)
 
 from ..scene import UV_EDGE
 from .mpvrender import FrameClock, IndexedDraw
 from .mpvwidget import MpvWidget
-from .projection import ProjectionPass, look_through, vec3
+from .helpers import ARROW_PX, ARROW_START, AXES, BODY, BODY_PX, COLOURS, ACTIVE, MARK, MARK_PX, TARGET, TARGET_PX, HelperPass, at, axis_frame
+from .projection import ProjectionPass, RayQuery, VisibilityError, look_through, qmatrix, vec3
+
+VIEW_KINDS = ("perspective", "front", "side", "top")
+FOV = 40.0                            # the orbit camera's vertical angle
 
 MAX_TEXTURE = 3840
 
@@ -80,6 +93,8 @@ uniform sampler2D pdepth; // nearest surface per projector texel, as distance / 
 uniform float pnear;
 uniform float pfar;
 uniform float ptexel;     // one visibility texel's width per metre of distance
+uniform vec4 pfit;        // where the clip sits in the image: left, bottom, width, height (0-1)
+uniform int pgrid;        // 1: a framing grid over the projected image
 out vec4 frag;
 void main() {
     vec3 n = normalize(cross(dFdx(v_world), dFdy(v_world)));   // the face's normal, towards the camera
@@ -104,8 +119,20 @@ void main() {
                 float slope = sqrt(max(1.0 - facing * facing, 0.0)) / max(facing, 0.05);
                 float bias = pc.w * ptexel * (1.5 + 2.0 * min(slope, 20.0)) + 1e-4 * pc.w;
                 if (pc.w <= texture(pdepth, st).r * pfar + bias) {
-                    vec4 t = texture(tex, st);
-                    c = t.rgb + grey * (1.0 - t.a);
+                    vec2 cuv = (st - pfit.xy) / pfit.zw;
+                    if (all(greaterThanEqual(cuv, vec2(0.0))) && all(lessThanEqual(cuv, vec2(1.0)))) {
+                        vec4 t = texture(tex, cuv);         // bars outside the clip project nothing
+                        c = t.rgb + grey * (1.0 - t.a);
+                    }
+                    if (pgrid == 1) {                      // eighths, the centre cross, the edge
+                        vec2 g = abs(fract(st * 8.0 + 0.5) - 0.5) / fwidth(st * 8.0);
+                        float line = 1.0 - clamp(min(g.x, g.y) - 0.5, 0.0, 1.0);
+                        vec2 e = min(st, 1.0 - st) / fwidth(st);
+                        float edge = 1.0 - clamp(min(e.x, e.y) - 1.5, 0.0, 1.0);
+                        vec2 m = abs(st - 0.5) / fwidth(st);
+                        float mid = 1.0 - clamp(min(m.x, m.y) - 1.0, 0.0, 1.0);
+                        c = mix(c, vec3(1.0, 0.85, 0.2), max(line * 0.55, max(edge, mid) * 0.9));
+                    }
                 }
             }
         }
@@ -163,6 +190,8 @@ class MappingView(MpvWidget):
     camera_input = Signal()            # the user dragged or scrolled in the view
     look_changed = Signal(bool)        # looking through the projector, or back to the orbit camera
     camera_moved = Signal()            # the orbit camera changed (by hand or by framing)
+    view_changed = Signal(str)         # perspective / front / side / top
+    locked_input = Signal()            # a drag or scroll while looking through: nothing moved
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -174,6 +203,7 @@ class MappingView(MpvWidget):
         # in the inspector is committed as it loses focus, and Space, arrows and F reach the
         # workspace again without pressing Enter first.
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.setMouseTracking(True)          # hover feedback for the editing tool (nothing happens without one)
         # scene and assignments (from the Mapping screen)
         self.scene = None
         self.assigned = {}               # object key -> UV set
@@ -187,11 +217,20 @@ class MappingView(MpvWidget):
         self.clip_aspect = None          # display width / height of the clip, for the projector
         self.looking_through = False
         self.projection = None           # ProjectionPass, made with the context
+        self.rays = None                 # RayQuery
+        self.helpers = None              # HelperPass
+        self.grid = False                # framing grid in the projected image
+        self.tool = None                 # nitpix/ui/projedit.py ViewportTool, or None
+        self.gizmo = False               # draw the move arrows at the projector
+        self.gizmo_active = None         # the arrow hovered or dragged ("x", "y", "z")
+        self.hit_marker = None           # world point under the cursor while picking
+        self.vis_problem = ""            # why the projector cannot be shown (visibility texture)
         self._world = {}                 # object key -> (QMatrix4x4, mirrored)
         # camera
         self.yaw, self.pitch, self.dist = 0.0, 12.0, 5.0
         self.cam_target = QVector3D(0, 0, 0)
         self.radius = 1.0
+        self.view_kind = "perspective"
         self.cam_version = 0
         self._drag = None
         # video texture
@@ -264,8 +303,8 @@ class MappingView(MpvWidget):
         return self.mode == "projectors" and p is not None and p.enabled and p.problem() is None and self.scene is not None
 
     def look_through(self, on: bool):
-        """See the stage from the projector (its pose and image); any orbit, pan, zoom or framing
-        returns to the orbit camera exactly as it was."""
+        """See the stage from the projector (its pose and image). Navigation is locked meanwhile;
+        leaving restores the camera exactly as it was (it was never moved)."""
         on = bool(on) and self.projector is not None and self.projector.problem() is None
         if on != self.looking_through:
             self.looking_through = on
@@ -274,7 +313,7 @@ class MappingView(MpvWidget):
 
     # ---- camera --------------------------------------------------------------------------
     def frame_all(self, reset=False):
-        """Fit the whole stage in view; `reset` also returns to the front view."""
+        """Fit the whole stage in view; `reset` also returns to the front perspective view."""
         self.look_through(False)
         if self.scene is not None:
             lo, hi = self.scene.bounds
@@ -282,11 +321,45 @@ class MappingView(MpvWidget):
             self.radius = max(1e-3, 0.5 * math.dist(lo, hi))
         if reset:
             self.yaw, self.pitch = 0.0, 12.0
-        self.dist = self.radius / math.sin(math.radians(20)) * 1.05
+            self._set_kind("perspective")
+        self.dist = self.radius / math.sin(math.radians(FOV / 2)) * 1.05
         self._camera_changed()
+
+    def frame_box(self, lo, hi):
+        """Fit this box (a selection, the projector and its target) in view; the direction stays."""
+        self.look_through(False)
+        self.cam_target = QVector3D(*[(a + b) / 2 for a, b in zip(lo, hi)])
+        r = max(0.05, 0.5 * math.dist(lo, hi))
+        self.dist = max(self.radius * 0.02, r / math.sin(math.radians(FOV / 2)) * 1.1)
+        self._camera_changed()
+
+    def set_view(self, kind):
+        """perspective (as it was before the axis view, or the front perspective view), front, side or top."""
+        self.look_through(False)
+        if kind == "front":
+            self.yaw, self.pitch = 0.0, 0.0
+        elif kind == "side":
+            self.yaw, self.pitch = 90.0, 0.0
+        elif kind == "top":
+            self.yaw, self.pitch = 0.0, 90.0
+        elif self.view_kind != "perspective":
+            self.pitch = max(-89.0, min(89.0, self.pitch if self.view_kind != "top" else 60.0))
+        self._set_kind(kind)
+        self._camera_changed()
+
+    def _set_kind(self, kind):
+        if kind != self.view_kind:
+            self.view_kind = kind
+            self.view_changed.emit(kind)
+
+    @property
+    def ortho(self) -> bool:
+        return self.view_kind != "perspective"
 
     def orbit(self, dx, dy):
         self.look_through(False)
+        if self.ortho:                        # orbiting an axis view: perspective from there
+            self._set_kind("perspective")
         self.yaw = (self.yaw - dx * 0.3) % 360
         self.pitch = max(-89.0, min(89.0, self.pitch + dy * 0.3))
         self._camera_changed()
@@ -296,7 +369,8 @@ class MappingView(MpvWidget):
         s = self.dist * 0.0012
         y = math.radians(self.yaw)
         right = QVector3D(math.cos(y), 0, -math.sin(y))
-        self.cam_target = self.cam_target - right * (dx * s) + QVector3D(0, dy * s, 0)
+        up = self._up() if self.view_kind == "top" else QVector3D(0, 1, 0)
+        self.cam_target = self.cam_target - right * (dx * s) + up * (dy * s)
         self._camera_changed()
 
     def zoom(self, steps):
@@ -315,23 +389,84 @@ class MappingView(MpvWidget):
         p, y = math.radians(self.pitch), math.radians(self.yaw)
         return self.cam_target + QVector3D(math.cos(p) * math.sin(y), math.sin(p), math.cos(p) * math.cos(y)) * self.dist
 
+    def _up(self) -> QVector3D:
+        if self.view_kind == "top" or abs(self.pitch) >= 89.99:   # looking straight down: upstage at the top
+            y = math.radians(self.yaw)
+            return QVector3D(-math.sin(y), 0, -math.cos(y)) * (1 if self.pitch > 0 else -1)
+        return QVector3D(0, 1, 0)
+
     def view_projection(self, w, h) -> QMatrix4x4:
         if self.looking_through and self.scene is not None:
-            return look_through(self.projector, self.projector.image_aspect(self.clip_aspect), w, h, self.scene.bounds)
+            return look_through(self.projector, w, h, self.scene.bounds)
         proj = QMatrix4x4()
-        near = max(self.radius * 1e-3, self.dist - self.radius * 3, 1e-4)
-        proj.perspective(40.0, w / max(1, h), near, self.dist + self.radius * 3)
+        aspect = w / max(1, h)
+        if self.ortho:
+            hh = self.dist * math.tan(math.radians(FOV / 2))
+            proj.ortho(-hh * aspect, hh * aspect, -hh, hh, self.dist - self.radius * 4, self.dist + self.radius * 4)
+        else:
+            near = max(self.radius * 1e-3, self.dist - self.radius * 3, 1e-4)
+            proj.perspective(FOV, aspect, near, self.dist + self.radius * 3)
         view = QMatrix4x4()
-        view.lookAt(self._eye(), self.cam_target, QVector3D(0, 1, 0))
+        view.lookAt(self._eye(), self.cam_target, self._up())
         return proj * view
+
+    # ---- screen <-> world (logical pixels, for the editing tools) ---------------------------------
+    def _vp(self) -> QMatrix4x4:
+        return self.view_projection(max(1, self.width()), max(1, self.height()))
+
+    def to_screen(self, p):
+        """Where a world point is in the view (logical pixels), or None behind the camera."""
+        c = self._vp().map(QVector4D(float(p[0]), float(p[1]), float(p[2]), 1.0))
+        if c.w() <= 1e-9:
+            return None
+        return QPointF((c.x() / c.w() + 1) * 0.5 * self.width(), (1 - c.y() / c.w()) * 0.5 * self.height())
+
+    def ray_at(self, pos):
+        """(origin, direction) in the world through a point of the view, perspective or orthographic."""
+        inv, ok = self._vp().inverted()
+        x = 2 * pos.x() / max(1, self.width()) - 1
+        y = 1 - 2 * pos.y() / max(1, self.height())
+        a, b = inv.map(QVector3D(x, y, -1.0)), inv.map(QVector3D(x, y, 1.0))
+        d = (b - a).normalized()
+        return (a.x(), a.y(), a.z()), (d.x(), d.y(), d.z())
+
+    def world_per_px(self, p) -> float:
+        """How far one logical pixel is in the world at that point, for helpers of constant size."""
+        if self.ortho:
+            return 2 * self.dist * math.tan(math.radians(FOV / 2)) / max(1, self.height())
+        e, fwd = self._eye(), (self.cam_target - self._eye()).normalized()
+        depth = max(1e-4, QVector3D.dotProduct(QVector3D(*p) - e, fwd))
+        return 2 * depth * math.tan(math.radians(FOV / 2)) / max(1, self.height())
+
+    def query_ray(self, origin, direction, far=None):
+        """The first stage surface along a ray: (world point, object key), or None. Runs on the GPU
+        with this view's context; helpers never take part."""
+        if self.rays is None or self.scene is None or not self.isValid():
+            return None
+        far = far if far is not None else (math.dist(origin, self.scene.bounds[0]) + math.dist(*self.scene.bounds) + 1.0)
+        self.makeCurrent()
+        try:
+            self._sync_scene()
+            hit = self.rays.run(self.context().extraFunctions(), origin, direction, far, self.scene, self._meshes,
+                                self._world, self._draw)
+        finally:
+            self.doneCurrent()
+        return None if hit is None else (hit[0], self.scene.objects[hit[1]].key)
 
     def mousePressEvent(self, e):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        if self.tool is not None and self.tool.press(e):
+            return
+        if self.looking_through:
+            self.locked_input.emit()
+            return
         pan = e.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton) or e.modifiers() & Qt.KeyboardModifier.ShiftModifier
         self._drag = ("pan" if pan else "orbit", e.position())
         self.camera_input.emit()
 
     def mouseMoveEvent(self, e):
+        if self.tool is not None and self.tool.move(e, navigating=bool(self._drag)):
+            return
         if not self._drag:
             return
         kind, last = self._drag
@@ -341,9 +476,19 @@ class MappingView(MpvWidget):
 
     def mouseReleaseEvent(self, e):
         self._drag = None
+        if self.tool is not None:
+            self.tool.release(e)
+
+    def leaveEvent(self, e):
+        if self.tool is not None:
+            self.tool.leave()
+        super().leaveEvent(e)
 
     def wheelEvent(self, e):
         d = e.angleDelta().y() / 120 or e.pixelDelta().y() / 40
+        if d and self.looking_through:
+            self.locked_input.emit()
+            return
         if d:
             self.zoom(d)
             self.camera_input.emit()
@@ -420,6 +565,8 @@ class MappingView(MpvWidget):
                 raise RuntimeError(self.prog.log() or "shader did not compile")
             self._draw = IndexedDraw(self.context())
             self.projection = ProjectionPass(self)
+            self.rays = RayQuery(self)
+            self.helpers = HelperPass(self)
             img = QImage(1, 1, QImage.Format.Format_RGBA8888)
             img.fill(QColor(0, 0, 0, 0))
             self._blank = QOpenGLTexture(img)
@@ -451,9 +598,16 @@ class MappingView(MpvWidget):
         self._sync_scene()                     # also releases the last meshes when the stage is emptied
         projecting = self.projecting() and self.projection is not None
         if projecting:
-            aspect = self.projector.image_aspect(self.clip_aspect)
-            if self.projection.prepare(f, self.projector, aspect, self.scene, self._geo_version, self._meshes, self._world, self._draw):
-                self.prog.bind()               # the visibility pass used its own program and target
+            try:
+                self.projection.prepare(f, self.projector, self.scene, self._geo_version, self._meshes, self._world, self._draw)
+                if self.vis_problem:
+                    self.vis_problem = ""
+                    self._report("")
+            except VisibilityError as e:
+                projecting = False
+                if str(e) != self.vis_problem:
+                    self.vis_problem = str(e)
+                    self._report(f"the projector cannot be shown: {e}. Try a smaller raster.")
         f.glBindFramebuffer(GL_FRAMEBUFFER, self.defaultFramebufferObject())
         dpr = self.devicePixelRatioF()
         W, H = int(self.width() * dpr), int(self.height() * dpr)
@@ -474,24 +628,26 @@ class MappingView(MpvWidget):
             self.prog.setUniformValue("mode", 1 if self.mode == "projectors" else 0)
             self.prog.setUniformValue("lit", 1 if projecting else 0)
             self.prog.setUniformValue("pdepth", 1)
+            self.prog.setUniformValue("pgrid", 1 if (projecting and self.grid) else 0)
             if projecting:
                 pp = self.projection
                 self.prog.setUniformValue("pvp", pp.pvp)
                 self.prog.setUniformValue("ppos", vec3(self.projector.position))
                 for name, v in (("pnear", pp.near), ("pfar", pp.far), ("ptexel", pp.texel)):
                     self.prog.setUniformValue1f(name, v)
+                self.prog.setUniformValue("pfit", *[float(c) for c in self.projector.content_rect(self.clip_aspect)])
             f.glActiveTexture(GL_TEXTURE1)            # always something valid on the visibility sampler
             f.glBindTexture(GL_TEXTURE_2D, self.projection.texture() if projecting else self._blank.textureId())
             f.glActiveTexture(GL_TEXTURE0)
             f.glBindTexture(GL_TEXTURE_2D, self.fbo.texture() if self.fbo is not None else self._blank.textureId())
-            tint = self.mode != "projectors"     # selection is a Surfaces thing
+            tint = 1.0 if self.mode != "projectors" else 0.5     # selection: lighter over the projection
             for o in self.scene.objects:
                 model, mirrored, _o = self._world[o.key]
                 uv = self.assigned.get(o.key)
                 self.prog.setUniformValue("mvp", vp * model)
                 self.prog.setUniformValue("model", model)
                 self.prog.setUniformValue("media", 1 if uv is not None else 0)
-                self.prog.setUniformValue1f("selected", 1.0 if tint and o.key in self.selected else 0.0)   # 1f: the Python-float overload sets it as an int (GL_INVALID_OPERATION)
+                self.prog.setUniformValue1f("selected", tint if o.key in self.selected else 0.0)   # 1f: the Python-float overload sets it as an int (GL_INVALID_OPERATION)
                 f.glFrontFace(GL_CW if mirrored else GL_CCW)      # negative scale turns winding round
                 for gid in o.geometries:
                     mesh = self._meshes.get(gid)
@@ -506,9 +662,45 @@ class MappingView(MpvWidget):
             p = self.projector
             if (self.mode == "projectors" and p is not None and p.show_frustum and p.problem() is None
                     and not self.looking_through and self.projection is not None):
-                self.projection.draw_frustum(f, vp, p, p.image_aspect(self.clip_aspect))
+                self.projection.draw_frustum(f, vp, p)
+            if self.helpers is not None and not self.looking_through:
+                self.helpers.draw(f, vp, eye, self.helper_items())
         if t0 is not None:
             self.stats.append((t0, time.perf_counter() - t0, drew, self.cam_version))
+
+    def helper_items(self):
+        """What the helpers draw now: (shape, model matrix, colour), sized for the screen."""
+        out, p = [], self.projector
+        if self.mode != "projectors" or p is None:
+            return out
+        pos = p.position
+        s = self.world_per_px(pos)
+        if p.problem() is None:
+            inv, _ok = qmatrix(p.view()).inverted()              # projector space -> world: its pose
+            body = QMatrix4x4(inv)
+            body.scale(BODY_PX * s)
+            out.append(("body", body, BODY))
+            out.append(("diamond", at(p.target, TARGET_PX * self.world_per_px(p.target)), TARGET))
+        else:
+            out.append(("diamond", at(pos, TARGET_PX * s), BODY))
+        if self.gizmo:
+            for axis in AXES:
+                out.append(("arrow", at(pos, ARROW_PX * s, axis_frame(axis)), ACTIVE if axis == self.gizmo_active else COLOURS[axis]))
+        if self.hit_marker is not None:
+            out.append(("diamond", at(self.hit_marker, MARK_PX * self.world_per_px(self.hit_marker)), MARK))
+        return out
+
+    def arrow_on_screen(self, axis):
+        """(start, end) of a move arrow in logical pixels, or None (behind the camera)."""
+        p = self.projector
+        if p is None:
+            return None
+        s = self.world_per_px(p.position) * ARROW_PX
+        a = AXES[axis]
+        start = tuple(p.position[i] + a[i] * s * ARROW_START for i in range(3))
+        end = tuple(p.position[i] + a[i] * s for i in range(3))
+        a2, b2 = self.to_screen(start), self.to_screen(end)
+        return None if a2 is None or b2 is None else (a2, b2)
 
     def shutdown(self):
         """GL objects go with the context current, then the render context and the core."""
@@ -522,6 +714,10 @@ class MappingView(MpvWidget):
             if self.projection is not None:
                 self.projection.destroy()
                 self.projection = None
+            for name in ("rays", "helpers"):
+                if getattr(self, name) is not None:
+                    getattr(self, name).destroy()
+                    setattr(self, name, None)
             if self._blank is not None:
                 self._blank.destroy()
                 self._blank = None

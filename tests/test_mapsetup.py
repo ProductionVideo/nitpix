@@ -334,7 +334,7 @@ class Retained(unittest.TestCase):
         aside = [r["key"] for r in session.project.q("SELECT key FROM meta WHERE key LIKE ?", (mapsave.KEY + ".unreadable-%",))]
         self.assertEqual(len(aside), 1)                                      # ...then set aside before the new save
         self.assertEqual(session.project.get_meta(aside[0]), bad)
-        self.assertEqual(self.saved(session)["version"], 1)
+        self.assertEqual(self.saved(session)["version"], mapsave.VERSION)
 
     def test_a_failed_save_is_shown_and_retried(self):
         ms, session = self.open(os.path.join(self.tmp, "s.nitpix"))

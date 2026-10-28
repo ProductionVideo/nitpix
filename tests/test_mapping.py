@@ -663,8 +663,8 @@ class ProjectorsTab(_Screen):
         eye = ms.view._eye()
         self.assertEqual(p.position, (eye.x(), eye.y(), eye.z()))           # where the camera is...
         self.assertEqual(p.target[0], 0.5)                                   # ...aimed where it looks
-        self.assertIsNone(p.aspect)                                          # following the clip
-        self.assertIn("Visibility 2048×1152", ms.proj_panel.info.text())     # 16:9 without a clip
+        self.assertEqual((p.throw, p.raster, p.fit), (1.5, (1920, 1080), "fit"))   # a fixed raster, not the clip's
+        self.assertIn("Visibility texture 2048×1152", ms.proj_panel.info.toolTip())   # detail, not a primary control
 
     def test_numbers_edit_the_projector_and_problems_are_said(self):
         ms = self.ms
@@ -676,22 +676,26 @@ class ProjectorsTab(_Screen):
             spin.setValue(v)
         for spin, v in zip(panel.tgt, (0, 2, 0)):
             spin.setValue(v)
-        panel.fov.setValue(30)
-        self.assertEqual((ms.projector.position, ms.projector.target, ms.projector.h_fov), ((0, 2, 10), (0, 2, 0), 30))
-        self.assertIn("Throw ratio 1.87:1 · 10.00 m to the target", panel.info.text())
-        panel.from_clip.setChecked(False)
-        panel.aspect.setValue(2.0)
-        self.assertEqual(ms.projector.aspect, 2.0)
-        self.assertIn("Visibility 2048×1024", panel.info.text())
-        panel.from_clip.setChecked(True)
-        self.assertIsNone(ms.projector.aspect)
-        panel.tgt[2].setValue(10)                                            # target on the projector
+        panel.throw.setValue(2.5)
+        self.assertEqual((ms.projector.position, ms.projector.target, ms.projector.throw), ((0, 2, 10), (0, 2, 0), 2.5))
+        self.assertIn("10.00 m to the target", panel.info.text())
+        self.assertIn("Image there 4.00 × 2.25 m", panel.info.text())
+        self.assertIn("22.6° wide", panel.fov_lab.text())                    # the angle follows the throw ratio
+        panel.raster_box.setCurrentIndex(panel.raster_box.findData("1920x1200"))
+        panel.raster_box.activated.emit(panel.raster_box.currentIndex())
+        self.assertEqual(ms.projector.raster, (1920, 1200))
+        self.assertIn("Visibility texture 2048×1280", panel.info.toolTip())
+        n = ms.editor.stack.count()
+        panel.tgt[2].setValue(10)                                            # target on the projector: refused, said
         self.assertFalse(panel.problem.isHidden())
         self.assertIn("at the projector's position", panel.problem.text())
-        self.assertFalse(panel.look_btn.isEnabled())
-        self.assertFalse(ms.view.projecting())
+        self.assertEqual(ms.projector.target, (0, 2, 0))                     # nothing changed...
+        self.assertEqual(panel.tgt[2].value(), 0)                            # ...and the field shows what is
+        self.assertEqual(ms.editor.stack.count(), n)
+        self.assertTrue(ms.view.projecting())
         panel.enabled.setChecked(False)
         self.assertFalse(ms.projector.enabled)
+        self.assertTrue(panel.problem.isHidden())
 
     def test_tabs_and_the_projector_leave_the_stage_clip_and_assignments_alone(self):
         ms = self.ms
@@ -709,8 +713,17 @@ class ProjectorsTab(_Screen):
         ms.view.load = lambda *a, **k: loads.append(a)
         ms.tabs.setCurrentIndex(1)
         ms.add_projector()
-        self.assertAlmostEqual(ms.projector.image_aspect(ms.clip_aspect), 2.5)   # from the clip
-        self.assertIn("aspect 2.500 (clip)", ms.proj_panel.info.text())
+        beam = ms.projector
+        self.assertAlmostEqual(beam.aspect, 16 / 9)                          # the raster's, not the 2.5 clip's
+        self.assertEqual(ms.view.projector.content_rect(ms.clip_aspect)[0::2], (0.0, 1.0))   # fitted: bars above and below
+        other = os.path.join(self.tmp, "square.mov")
+        open(other, "wb").close()
+        sq = self.session.project.upsert_asset(other, kind="video", name="square.mov", fps="25/1", frames=20, duration=0.8,
+                                               width=1000, height=1000, scan_state="done")
+        ms.refresh_media()
+        ms._choose_media(sq)                                                 # another clip: the beam stays
+        self.assertEqual(ms.projector, beam)
+        ms._choose_media(aid)
         ms.tabs.setCurrentIndex(0)
         self.assertEqual(ms.view.mode, "surfaces")
         self.assertEqual((ms.assign.uv, ms.view.assigned, (ms.view.yaw, ms.view.dist)), (uv, uv, cam))
@@ -725,6 +738,85 @@ class ProjectorsTab(_Screen):
         ms.reset_project()                                                   # another project: it goes
         self.assertIsNone(ms.projector)
         self.assertEqual(ms.proj_panel.pages.currentIndex(), 0)
+
+    def test_one_edit_path_with_undo_and_a_cancelled_drag_is_never_saved(self):
+        """Every edit is one undoable step through the same path; a drag is a preview until released,
+        and cancelling it (even with an autosave in between) leaves the saved setup as it was."""
+        from PySide6.QtCore import QEvent, QPoint, Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtTest import QTest
+        from nitpix import mapsave
+        ms = self.ms
+        ms.activate()                                                        # binds the saver (nothing saved yet)
+        self.import_(os.path.join(FIX, "projector", "projection.obj"))
+        ms.tabs.setCurrentIndex(1)
+        ms.add_projector()                                                   # at the camera: move it into view
+        ms.edit_projector({"position": (0.0, 2.0, 10.0), "target": (0.0, 2.0, 0.0)}, "Place")
+        ms.view.yaw, ms.view.dist = 50.0, 25.0
+        ms.view._camera_changed()
+        panel = ms.proj_panel
+        panel.throw.setValue(2.0)
+        self.assertEqual([ms.editor.stack.text(i) for i in range(ms.editor.stack.count())], ["Add projector", "Place", "Throw ratio"])
+        ms.undo()
+        self.assertEqual((ms.projector.throw, panel.throw.value()), (1.5, 1.5))
+        self.assertIn("Throw ratio", panel.redo_btn.toolTip())
+        ms.redo()
+        self.assertEqual(ms.projector.throw, 2.0)
+        ms.flush()
+        saved = lambda: mapsave.projector_from(self.session.project.get_meta(mapsave.KEY)["projectors"][0])
+        self.assertEqual(saved(), ms.projector)
+        committed = ms.projector
+        v = ms.view
+        self.assertTrue(v.gizmo)
+        a, b = v.arrow_on_screen("x")
+        grab = QPoint(round(a.x() + (b.x() - a.x()) * 0.7), round(a.y() + (b.y() - a.y()) * 0.7))
+        away = grab + QPoint(round((b.x() - a.x()) * 2), round((b.y() - a.y()) * 2))
+        QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, grab)
+        QTest.mouseMove(v, away)
+        self.assertEqual(ms.tool.mode, "drag")
+        self.assertGreater(ms.editor.preview.position[0], committed.position[0])   # shown moving...
+        self.assertEqual(ms.projector, committed)                            # ...not committed
+        ms.saver.changed()
+        ms.flush()                                                           # an autosave during the drag
+        self.assertEqual(saved(), committed)
+        esc = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+        self.assertTrue(ms.handle_key(esc))
+        QTest.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, away)
+        self.assertIsNone(ms.editor.preview)
+        self.assertEqual((ms.projector, ms.editor.stack.count()), (committed, 3))
+        QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, grab)   # again, released: one step
+        QTest.mouseMove(v, away)
+        QTest.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, away)
+        moved = ms.projector
+        self.assertGreater(moved.position[0], committed.position[0])
+        self.assertEqual(moved.target[0] - moved.position[0], committed.target[0] - committed.position[0])   # orientation kept
+        self.assertEqual(ms.editor.stack.text(ms.editor.stack.index() - 1), "Move X")
+        ms.flush()
+        self.assertEqual(saved(), moved)
+        ms.undo()
+        self.assertEqual(ms.projector, committed)
+        QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, grab)   # mid-drag, another project
+        QTest.mouseMove(v, away)
+        ms.reset_project()
+        self.assertEqual((ms.projector, ms.editor.preview, ms.editor.stack.count(), ms.tool.mode), (None, None, 0, "idle"))
+        QTest.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, away)
+        self.assertIsNone(ms.projector)
+
+    def test_views_and_framing(self):
+        ms = self.ms
+        self.import_(os.path.join(FIX, "projector", "projection.obj"))
+        ms.view_btns["top"].click()
+        self.assertEqual((ms.view.view_kind, ms.view.pitch), ("top", 90.0))
+        up = ms.view._up()
+        self.assertEqual((round(up.x(), 6), round(up.z(), 6)), (0.0, -1.0))   # upstage at the top of the screen
+        ms.view.orbit(10, 0)                                                 # orbiting an axis view: perspective
+        self.assertEqual(ms.view.view_kind, "perspective")
+        self.assertTrue(ms.view_btns["perspective"].isChecked())
+        ms.select(["m1:Occluder"])
+        ms.frame_selected()
+        t = ms.view.cam_target
+        self.assertEqual((round(t.x(), 6), round(t.y(), 6), round(t.z(), 6)), (1.0, 1.5, 2.0))
+        self.assertLess(ms.view.dist, 5)
 
 
 @unittest.skipUnless(HAS, "needs PySide6 and assimp-py")

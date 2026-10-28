@@ -31,7 +31,7 @@ if LIVE:
 
     from nitpix import libmpv
     from nitpix.probe import ffprobe, find_tool, normalise, summary_fields
-    from nitpix.projector import Projector, mat_mul, transform
+    from nitpix.projector import Projector, mat_mul, raster_for, throw_from_fov, transform
     from nitpix.scene import load_scene
     from nitpix.stage import Stage
     from nitpix.ui.mapview import MappingView
@@ -41,7 +41,8 @@ if LIVE:
     LIVE = libmpv.available() and bool(FFMPEG)
 
 RED, GREEN, BLUE, YELLOW, MAGENTA = (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)
-FRONT = dict(position=(0.0, 2.0, 10.0), target=(0.0, 2.0, 0.0), h_fov=30.0)
+FRONT = dict(position=(0.0, 2.0, 10.0), target=(0.0, 2.0, 0.0), throw=1 / (2 * math.tan(math.radians(15))))
+WIDE = dict(FRONT, raster=(1920, 768))                    # 2.5:1, the corners clip's shape
 
 
 def pump(sec):
@@ -63,14 +64,14 @@ def neutral(c):
 def on_wall(p, aspect, u, v, z=0.0):
     """Where image point (u, v) (v = 1 the top) lands on the plane z, by the projector's own rays."""
     r, up, f = p.basis()
-    th = math.tan(math.radians(p.h_fov) / 2)
+    th = 1 / (2 * p.throw)
     d = [f[i] + (2 * u - 1) * th * r[i] + (2 * v - 1) * th / aspect * up[i] for i in range(3)]
     t = (z - p.position[2]) / d[2]
     return tuple(p.position[i] + t * d[i] for i in range(3))
 
 
 def image_uv(p, aspect, point):
-    x, y, _z, w = transform(mat_mul(p.projection(aspect, 0.1, 100.0), p.view()), point)
+    x, y, _z, w = transform(mat_mul(p.projection(0.1, 100.0), p.view()), point)
     return (x / w + 1) / 2, (y / w + 1) / 2
 
 
@@ -147,8 +148,8 @@ class Projected(unittest.TestCase):
     def test_labelled_clip_lands_the_right_way_round_at_its_aspect(self):
         """No UVs anywhere. Corners in their places, the image's edges where the projector's
         rays put them (2.5:1 from the clip), from two viewpoints."""
-        p = Projector(**FRONT)
-        v = self.make(self.stage, self.corners, aspect=2.5)
+        p = Projector(**WIDE)
+        v = self.make(self.stage, self.corners, projector=p, aspect=2.5)
         for yaw in (20, 40):                                   # from the right: the occluder never hides a landmark
             img = self.camera(v, (0, 2, 0), yaw, 8, 9)
             at = lambda u, vv: self.pixel(v, img, on_wall(p, 2.5, u, vv))
@@ -164,7 +165,7 @@ class Projected(unittest.TestCase):
     def test_a_curved_surface_takes_the_picture_where_the_rays_fall(self):
         """Every point of the half cylinder shows the image position the projector's ray gives it
         (red = u, green = v), and moving the orbit camera does not move it on the surface."""
-        p = Projector(position=(0.0, 1.5, 8.0), target=(0.0, 1.5, 0.0), h_fov=30.0)
+        p = Projector(position=(0.0, 1.5, 8.0), target=(0.0, 1.5, 0.0), throw=throw_from_fov(30.0))
         v = self.make(self.curve, self.ramp, projector=p, aspect=16 / 9)
         for yaw, pitch in ((0, 5), (35, 15), (-30, -5)):
             img = self.camera(v, (0, 1.5, 0.75), yaw, pitch, 6)
@@ -199,7 +200,7 @@ class Projected(unittest.TestCase):
         """From the side at about 63° to the wall's normal. The wall is lit evenly (no self-shadow
         speckle), and the 5 cm-proud plaque's shadow strip (about 11 cm wide) is dark right up to it."""
         aim = (-0.5, 1.2, 0.0)
-        p = Projector(position=(8.0, 2.0, 4.0), target=aim, h_fov=30.0)
+        p = Projector(position=(8.0, 2.0, 4.0), target=aim, throw=throw_from_fov(30.0))
         v = self.make(self.stage, self.magenta, projector=p, aspect=16 / 9)
         img = self.camera(v, (-0.5, 1.2, 0.0), 0, 0, 3.5)
         speckles, checked = [], 0
@@ -219,7 +220,7 @@ class Projected(unittest.TestCase):
         self.assertEqual(speckles, [])
         self.assertTrue(neutral(self.pixel(v, img, (-0.80, 1.2, 0.0))))         # 5 cm beside the plaque: in its shadow
         self.assertTrue(like(self.pixel(v, img, (-0.98, 1.2, 0.0)), MAGENTA))   # past the strip: lit
-        self.assertTrue(like(self.pixel(v, img, (-0.5, 1.2, 0.05)), MAGENTA))   # the plaque itself
+        self.assertTrue(like(self.pixel(v, img, (-0.38, 1.3, 0.05)), MAGENTA))  # the plaque (beside the target marker)
 
     def test_visibility_is_reused_while_playing_and_orbiting_and_edits_never_reach_the_player(self):
         v = self.make(self.stage, self.bars, frame=0, aspect=16 / 9)
@@ -245,7 +246,7 @@ class Projected(unittest.TestCase):
         for i in range(40):
             v.orbit(2, 0)
             if i % 10 == 0:
-                v.set_projector(v.projector.with_(h_fov=25 + i / 4), 16 / 9)
+                v.set_projector(v.projector.with_(throw=1.8 + i / 100), 16 / 9)
             if i == 20:
                 v.look_through(True)
             pump(0.01)
@@ -262,7 +263,7 @@ class Projected(unittest.TestCase):
         screen = st.add(load_scene(os.path.join(FIX, "parts", "centre.obj")))
         st.add(load_scene(os.path.join(PROJ, "curve.obj")))   # in front of the screen's middle, clear of its corners
         key = screen.objects[0].key
-        v = self.make(st, self.corners, aspect=2.5)
+        v = self.make(st, self.corners, projector=Projector(**WIDE), aspect=2.5)
         gl, paint = [], v.paintGL
         v.paintGL = lambda: (paint(), gl.append(v.context().functions().glGetError()))
         v.set_assignments({key: 0})
@@ -274,7 +275,7 @@ class Projected(unittest.TestCase):
         v.set_mode("projectors")
         img = self.camera(v, (0, 2, 0), 10, 5, 12)
         self.assertTrue(neutral(self.pixel(v, img, uv_tl)), self.pixel(v, img, uv_tl))   # outside the projected image: no UV picture
-        p = Projector(**FRONT)
+        p = Projector(**WIDE)
         tl = on_wall(p, 2.5, 0.06, 0.9, z=0.0)
         self.assertTrue(like(self.pixel(v, img, (tl[0], tl[1], 0.0)), RED))      # the projected corner, on the screen
         v.set_mode("surfaces")
@@ -299,6 +300,69 @@ class Projected(unittest.TestCase):
         self.assertGreater(len(gl), 10)
         self.assertEqual(sorted(set(gl)), [0])
         self.assertIsNotNone(o)
+
+    # ---- the setup workflow's GL parts -----------------------------------------------------------
+    def test_a_clip_of_another_shape_is_fitted_and_its_bars_light_nothing(self):
+        """A 2.5:1 clip in a 16:9 raster: the beam keeps the raster's shape; the clip sits in the middle,
+        bars above and below project nothing. Stretch fills the raster instead."""
+        p = Projector(**FRONT)                                               # 1920 x 1080
+        v = self.make(self.stage, self.corners, projector=p, aspect=2.5)
+        img = self.camera(v, (0, 2, 0), 40, 8, 9)
+        bar = (16 / 9) / 2.5                                                  # the clip's height share of the image
+        at = lambda u, vv: self.pixel(v, img, on_wall(p, 16 / 9, u, vv))
+        self.assertTrue(like(at(0.06, 0.5 + bar / 2 - 0.04), RED), at(0.06, 0.5 + bar / 2 - 0.04))   # the clip's top-left
+        self.assertTrue(neutral(at(0.06, 0.5 + bar / 2 + 0.06)), at(0.06, 0.5 + bar / 2 + 0.06))   # the bar above it
+        self.assertTrue(neutral(at(0.5, 0.03)))                                                      # the bar below
+        self.assertEqual(v.projection.size, (2048, 1152))                     # the raster's shape, not the clip's
+        v.set_projector(p.with_(fit="stretch"), 2.5)
+        img = self.camera(v, (0, 2, 0), 40, 8, 9)
+        self.assertTrue(like(self.pixel(v, img, on_wall(p, 16 / 9, 0.06, 0.95)), RED))
+        v.grid = True                                                         # the framing grid: drawn, no GL error
+        img = self.camera(v, (0, 2, 0), 40, 8, 9)
+        self.assertEqual(v.context().functions().glGetError(), 0)
+
+    def test_picking_finds_the_nearest_surface_in_any_view(self):
+        """GPU ray queries: the nearest of overlapping surfaces, a miss, transformed geometry, and
+        the point under the cursor in perspective and orthographic views at this display's scale."""
+        v = self.make(self.stage, self.magenta, aspect=16 / 9)
+        hit = v.query_ray((1.0, 1.5, 10.0), (0.0, 0.0, -1.0))                 # the occluder stands in front of the wall
+        self.assertEqual(hit[1], "Occluder")
+        self.assertAlmostEqual(hit[0][2], 2.0, 3)
+        hit = v.query_ray((4.0, 2.0, 10.0), (0.0, 0.0, -1.0))
+        self.assertEqual(hit[1], "Wall")
+        self.assertAlmostEqual(hit[0][2], 0.0, 3)
+        self.assertIsNone(v.query_ray((0.0, 2.0, 10.0), (0.0, 1.0, 0.0)))     # nothing above
+        v.gizmo = True                                                        # helpers drawn at the projector: never hit
+        self.assertEqual(v.query_ray((0.0, 2.0, 12.0), (0.0, 0.0, -1.0))[1], "Wall")
+        self.camera(v, (0, 2, 0), 20, 8, 9)                                  # in front of Rear (z 14), which faces the wall
+        for kind, points in (("perspective", ((3.0, 1.0, 0.0), (-4.0, 3.5, 0.0), (1.0, 1.5, 2.0))),
+                             ("front", ((4.5, 1.0, 0.0), (-4.5, 4.5, 0.0)))):            # beside Rear: it hides the rest
+            v.set_view(kind)
+            pump(0.1)
+            for point in points:
+                o, d = v.ray_at(v.to_screen(point))
+                hit = v.query_ray(o, d)
+                self.assertIsNotNone(hit, (kind, point))
+                self.assertLess(math.dist(hit[0], point), 0.02, (kind, point, hit, v.devicePixelRatioF()))
+        st = load_scene(os.path.join(FIX, "stage_cm_zup.fbx"))               # centimetres, Z up: transformed on import
+        v.set_scene(st)
+        pump(0.2)
+        lo, hi = st.bounds
+        c = [(a + b) / 2 for a, b in zip(lo, hi)]
+        hit = v.query_ray((c[0], c[1], hi[2] + 5), (0.0, 0.0, -1.0))
+        self.assertIsNotNone(hit)
+        self.assertTrue(all(lo[i] - 1e-3 <= hit[0][i] <= hi[i] + 1e-3 for i in range(3)), (hit, st.bounds))
+
+    def test_visibility_is_bounded_both_ways_for_any_raster(self):
+        v = self.make(self.stage, self.magenta, aspect=16 / 9)
+        gl, paint = [], v.paintGL
+        v.paintGL = lambda: (paint(), gl.append(v.context().functions().glGetError()))
+        for raster, size in (((1080, 1920), (1152, 2048)), ((16, 16384), (2, 2048)), ((16384, 16), (2048, 2))):
+            v.set_projector(Projector(**FRONT, raster=raster), 16 / 9)
+            pump(0.15)
+            self.assertEqual(v.projection.size, size)
+        self.assertEqual(sorted(set(gl)), [0])
+        self.assertEqual(v.vis_problem, "")
 
 
 if __name__ == "__main__":

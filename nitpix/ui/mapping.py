@@ -30,20 +30,24 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QMenu, QSplitter, QStackedWidget, QTabWidget, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
+import math
+
+from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QObject, Qt, QTimer, Signal
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
+                               QLabel, QLineEdit, QMenu, QScrollArea, QSplitter, QStackedWidget, QTabBar, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import mapsave, models, service
 from ..mapping import MIXED, Assignments, share
-from ..projector import from_view
+from ..projector import Projector, from_view
+from ..scene import _bounds
 from ..sceneimport import Importer
 from ..stage import Stage, split_key
 from . import theme
-from .mapview import MAX_TEXTURE, MappingView
+from .mapview import FOV, MAX_TEXTURE, MappingView
 from .playhead import Playhead
-from .projection import VISIBILITY_SIZE
+from .projection import visibility_size
+from .projedit import ProjectorEditor, ViewportTool
 from .mapsetup import SetupSaver
 from .projectors import ProjectorPanel
 from .review import PosCtx, btn
@@ -58,6 +62,35 @@ MEDIA_KINDS = ("video", "sequence", "image")
 SAVE_NOTE = ("Kept with the project: the model files (copied into it), the stage, assignments, clip, projector and "
              "camera. Clips themselves stay where they are.")
 CAMERA_HINT = "Drag to orbit · ⇧-drag or right-drag to pan · scroll to zoom · F frames the stage"
+VIEW_BUTTONS = (("Persp", "perspective", "Perspective: drag to orbit"), ("Front", "front", "Orthographic, from the front (+Z)"),
+                ("Side", "side", "Orthographic, from the right side (+X)"), ("Top", "top", "Orthographic, from above; upstage at the top"))
+BANNER = {"info": ("rgba(20,20,22,215)", "ink"), "hit": ("rgba(20,20,22,215)", "ink"), "miss": ("rgba(20,20,22,215)", "warn"),
+          "warn": ("rgba(20,20,22,215)", "warn"), "look": ("rgba(140,92,10,225)", "ink")}
+
+
+class _Overlay(QObject):
+    """Keeps the view's floating controls in their corners as it resizes."""
+
+    def __init__(self, view, top_left, bottom_left):
+        super().__init__(view)
+        self.view, self.tl, self.bl = view, top_left, bottom_left
+        view.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.LayoutRequest):
+            self.place()
+        return False
+
+    def place(self):
+        self.tl.adjustSize()
+        self.tl.move(8, 8)
+        lab = self.bl.findChild(QLabel)
+        room = max(160, self.view.width() - 16)
+        if lab is not None:                          # one line when it fits, wrapped only when it must
+            want = lab.fontMetrics().horizontalAdvance(lab.text()) + 110
+            self.bl.setFixedWidth(min(room, want))
+        self.bl.adjustSize()
+        self.bl.move(8, self.view.height() - self.bl.height() - 8)
 
 
 class _Filter(QLineEdit):
@@ -101,7 +134,9 @@ class MappingScreen(QWidget):
         self.stage = Stage()
         self.assign = None
         self._batch = None                     # the Add / Replace in progress
-        self.projector = None                  # nitpix.projector.Projector, or None
+        self.editor = ProjectorEditor(self)    # the projector: committed state, drag previews, undo
+        self._refused = None                   # why the last projector edit was not made (shown until the next)
+        self._centre = None                    # where the middle of the beam meets the stage (a ray query)
         self.clip_aspect = None                # the mapped clip's display width / height
         self.resources = {}                    # resource id -> its record (nitpix/models.py)
         self.src_res = {}                      # source id -> resource id
@@ -179,7 +214,50 @@ class MappingScreen(QWidget):
         self.view.setToolTip(CAMERA_HINT)
         self.view.camera_input.connect(lambda: self.hint_lab.hide())
         self.view.camera_moved.connect(lambda: self.saver.changed(camera=True))   # learned; the view's tooltip still has it
+        self.view.view_changed.connect(self._on_view_kind)
+        self.view.locked_input.connect(lambda: self._banner("Looking through the projector: navigation is paused. "
+                                                            "Exit (Esc) to move the view.", "look", exit=True))
         ll.addWidget(self.view, 1)
+        bar = QFrame(self.view)                                # view controls, floating over the stage
+        bar.setStyleSheet("QFrame { background: rgba(14,14,16,190); border-radius: 8px; }")
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(4, 4, 4, 4)
+        bl.setSpacing(2)
+        self.view_group = QButtonGroup(self)
+        self.view_btns = {}
+        for text, kind, tip in VIEW_BUTTONS:
+            b = btn(text, tip, lambda _c=False, k=kind: self.set_view(k), ghost=True)
+            b.setCheckable(True)
+            self.view_group.addButton(b)
+            self.view_btns[kind] = b
+            bl.addWidget(b)
+        self.view_btns["perspective"].setChecked(True)
+        sep = QFrame()
+        sep.setFixedWidth(10)
+        bl.addWidget(sep)
+        bl.addWidget(btn("Frame all", "Fit the whole stage in view (F)", lambda: self.frame_all(), ghost=True))
+        self.frame_sel_btn = btn("Frame selected", "Fit the selected objects in view; with none selected in Projectors, "
+                                 "the projector and its target", self.frame_selected, ghost=True)
+        bl.addWidget(self.frame_sel_btn)
+        self.banner = QFrame(self.view)
+        bn = QHBoxLayout(self.banner)
+        bn.setContentsMargins(10, 6, 6, 6)
+        bn.setSpacing(8)
+        self.banner_lab = QLabel()
+        self.banner_lab.setWordWrap(True)
+        bn.addWidget(self.banner_lab, 1)
+        self.banner_exit = btn("Exit", "Back to your view (Esc)", self.exit_modes)
+        bn.addWidget(self.banner_exit)
+        self.banner.hide()
+        self._overlay = _Overlay(self.view, bar, self.banner)
+        self.tool = ViewportTool(self.view, self.editor, self._object_name, self)
+        self.view.tool = self.tool
+        self.tool.feedback.connect(lambda t, k: self._banner(t, k))
+        self.tool.mode_changed.connect(self._on_tool_mode)
+        self.editor.changed.connect(self._projector_changed)
+        self.editor.committed.connect(self._on_committed)
+        self._centre_timer = QTimer(self, singleShot=True, interval=60)
+        self._centre_timer.timeout.connect(self._measure_centre)
         self.playhead = Playhead(self.view, lambda: True, self)
         self.playhead.moved.connect(self._on_moved)
         self.playhead.pending_changed.connect(lambda _p: self.ctx and self._update_tc())
@@ -194,8 +272,7 @@ class MappingScreen(QWidget):
         self.hint_lab = ElideLabel(CAMERA_HINT)               # until the camera is first moved this session
         self.hint_lab.setProperty("faint", True)
         info.addWidget(self.hint_lab, 2)
-        info.addWidget(btn("Frame all", "Fit the whole stage in view (F)", lambda: self.view.frame_all()))
-        info.addWidget(btn("Reset view", "Front view, whole stage", lambda: self.view.frame_all(reset=True)))
+        info.addWidget(btn("Reset view", "Front perspective view, whole stage", lambda: self.frame_all(reset=True)))
         ll.addLayout(info)
         tr = QHBoxLayout()
         tr.setSpacing(10)
@@ -232,9 +309,21 @@ class MappingScreen(QWidget):
         ll.addWidget(self.timeline)
         split.addWidget(left)
 
-        right = QWidget()
+        side = QWidget()
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(*PANE_MARGINS)
+        sl.setSpacing(8)
+        self.tabs = QTabBar()                          # what the view shows; the stage list below serves both
+        self.tabs.setDrawBase(False)
+        self.tabs.setExpanding(False)
+        self.tabs.addTab("Surfaces")
+        self.tabs.setTabToolTip(0, "The stage's objects show the clip through their own UVs, as assigned.")
+        self.tabs.addTab("Projectors")
+        self.tabs.setTabToolTip(1, "One virtual projector casts the clip onto every surface (UVs not needed).")
+        sl.addWidget(self.tabs)
+        right = QWidget()                              # the stage's files and objects
         rlay = QVBoxLayout(right)
-        rlay.setContentsMargins(*PANE_MARGINS)
+        rlay.setContentsMargins(0, 0, 0, 0)
         rlay.setSpacing(6)
         frow = QHBoxLayout()
         self.filter = _Filter()
@@ -325,28 +414,52 @@ class MappingScreen(QWidget):
         self.remove_btn = btn("Remove from stage", "", self.remove_selected_source, ghost=True)
         self.remove_btn.hide()
         il.addWidget(self.remove_btn)
-        rlay.addWidget(insp)
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.addTab(right, "Surfaces")
-        self.tabs.setTabToolTip(0, "The stage's files and objects, and which show the clip through their own UVs.")
+        il.addStretch(1)
         self.proj_panel = ProjectorPanel()
-        self.tabs.addTab(self.proj_panel, "Projectors")
-        self.tabs.setTabToolTip(1, "One virtual projector casting the clip onto every surface (UVs not needed).")
+        self.proj_scroll = QScrollArea()
+        self.proj_scroll.setWidgetResizable(True)
+        self.proj_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.proj_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)   # dragged narrow: scrolls, never clips
+        self.proj_scroll.setWidget(self.proj_panel)
+        pwrap = QFrame()
+        pwrap.setObjectName("inspector")
+        pwrap.setStyleSheet(f"QFrame#inspector {{ border-top: 1px solid {theme.T['line2']}; }}")
+        pw = QVBoxLayout(pwrap)
+        pw.setContentsMargins(0, 10, 0, 0)
+        pw.addWidget(self.proj_scroll)
+        self.proj_panel.setContentsMargins(0, 0, 12, 0)               # clear of the scroll bar
+        self.inspectors = QStackedWidget()
+        self.inspectors.addWidget(insp)
+        self.inspectors.addWidget(pwrap)
+        self.side_split = QSplitter(Qt.Orientation.Vertical)
+        self.side_split.setHandleWidth(8)
+        self.side_split.addWidget(right)
+        self.side_split.addWidget(self.inspectors)
+        self.side_split.setCollapsible(0, False)
+        self.side_split.setCollapsible(1, False)
+        self._side_sizes = {0: [520, 200], 1: [200, 520]}      # list / inspector, per tab, as last left
+        sl.addWidget(self.side_split, 1)
         self.tabs.currentChanged.connect(self._on_tab)
         p = self.proj_panel
         p.add_models_requested.connect(self.add_dialog)
         p.add_requested.connect(self.add_projector)
-        p.from_view_requested.connect(self.projector_from_view)
+        p.pick_requested.connect(self.start_pick)
+        p.place_requested.connect(self.place_at_view)
+        p.match_requested.connect(self.projector_from_view)
         p.remove_requested.connect(self.remove_projector)
         p.changed.connect(self.edit_projector)
-        p.look_requested.connect(lambda on: self.view.look_through(on))
+        p.look_requested.connect(self.look_through)
+        p.undo_requested.connect(self.undo)
+        p.redo_requested.connect(self.redo)
+        p.keep_aim_changed.connect(lambda on: setattr(self.tool, "keep_aim", on))
+        p.grid_changed.connect(self._set_grid)
+        p.frame_requested.connect(self.frame_projector)
         p.done_editing.connect(lambda: self.view.setFocus())
-        self.view.look_changed.connect(p.set_looking)
-        split.addWidget(self.tabs)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 1)
-        split.setSizes([900, 340])
+        self.view.look_changed.connect(self._on_look)
+        split.addWidget(side)
+        split.setStretchFactor(0, 1)                   # a smaller window narrows the view, not the inspector
+        split.setStretchFactor(1, 0)
+        split.setSizes([880, 390])
         root.addWidget(split, 1)
         self._show_objects()
         self._import_ui(False)
@@ -412,7 +525,10 @@ class MappingScreen(QWidget):
         self.asset = self.ctx = None
         self._replace_with([])
         self.result.hide()
-        self.remove_projector()
+        self.tool.cancel()
+        self.view.look_through(False)
+        self._refused, self._centre = None, None
+        self.editor.reset(None)                       # no history carries into the next project
         self.media_box.clear()
         self.tc_lab.setText("--:--:--:--")
         self.tc_sub.setText("")
@@ -437,7 +553,7 @@ class MappingScreen(QWidget):
             self.saver.bind(p)
             return None
         try:
-            doc = mapsave.validate(raw)
+            doc = mapsave.validate(raw, clip_aspect=self._saved_clip_aspect(raw))
         except mapsave.SetupError as e:
             self.saver.bind(p, unreadable=raw)
             self._on_problem(f"the saved Mapping setup could not be read ({e}). It is kept unchanged in the project; "
@@ -454,7 +570,8 @@ class MappingScreen(QWidget):
         if cam:
             self._saved_camera = cam
             self._apply_camera(cam)
-        self.projector = mapsave.projector_from(doc["projectors"][0]) if doc["projectors"] else None
+        self.tool.cancel()
+        self.editor.reset(mapsave.projector_from(doc["projectors"][0]) if doc["projectors"] else None)
         self.tabs.setCurrentIndex(mapsave.TABS.index(doc["tab"]))
         items = []
         for s in doc["sources"]:
@@ -476,6 +593,7 @@ class MappingScreen(QWidget):
         self._pending_assign = {}
         if self._saved_camera:
             self._apply_camera(self._saved_camera)
+        self._centre_timer.start()                    # where the restored projector's beam lands
         self._changed()
         self._show_objects()
         self.saver.state = "saved"                    # restoring changed nothing that needs writing
@@ -498,11 +616,20 @@ class MappingScreen(QWidget):
         elif n_ok:
             self.status.emit(f"Mapping setup restored: {n_ok} model file{'s' if n_ok != 1 else ''}.", False)
 
+    def _saved_clip_aspect(self, raw):
+        """The saved clip's display aspect, for migrating a projector that followed the clip."""
+        clip = raw.get("clip") if isinstance(raw, dict) else None
+        if not isinstance(clip, int) or isinstance(clip, bool):
+            return None
+        a = service.asset_detail(self.session.project, clip)
+        return a["width"] / a["height"] if a and a.get("width") and a.get("height") else None
+
     def _apply_camera(self, cam):
         from PySide6.QtGui import QVector3D
         v = self.view
         v.cam_target = QVector3D(*cam["target"])
         v.yaw, v.pitch, v.dist = cam["yaw"], cam["pitch"], cam["dist"]
+        v._set_kind(cam.get("view", "perspective"))
         lo, hi = self.stage.bounds
         v.radius = max(1e-3, 0.5 * ((hi[0] - lo[0]) ** 2 + (hi[1] - lo[1]) ** 2 + (hi[2] - lo[2]) ** 2) ** 0.5) if self.stage else v.radius
         v._camera_changed()
@@ -522,7 +649,7 @@ class MappingScreen(QWidget):
                 "assignments": assign, "clip": self.asset["id"] if self.asset else self._saved_clip,
                 "tab": mapsave.TABS[self.tabs.currentIndex()],
                 "camera": {"yaw": v.yaw, "pitch": v.pitch, "dist": v.dist,
-                           "target": [v.cam_target.x(), v.cam_target.y(), v.cam_target.z()]},
+                           "target": [v.cam_target.x(), v.cam_target.y(), v.cam_target.z()], "view": v.view_kind},
                 "projectors": [mapsave.projector_to(self.projector)] if self.projector else []}
 
     def _on_save_state(self, state, detail):
@@ -1332,53 +1459,222 @@ class MappingScreen(QWidget):
         self.saver.changed()
 
     # ---- projector ---------------------------------------------------------------------------
+    @property
+    def projector(self):
+        """The committed projector (what is saved), or None."""
+        return self.editor.state
+
     def _on_tab(self, i):
+        prev = 1 - i
+        if hasattr(self, "_side_sizes") and self.side_split.sizes() and sum(self.side_split.sizes()):
+            self._side_sizes[prev] = self.side_split.sizes()
         mode = "projectors" if i == 1 else "surfaces"
+        self.inspectors.setCurrentIndex(i)
+        self.side_split.setSizes(self._side_sizes[i])
+        self.tool.cancel()
         self.view.set_mode(mode)
         if hasattr(self, "saver"):
             self.saver.changed()
         self.mode_lab.setText("Projector preview" if mode == "projectors" else "UV assignments")
         self.mode_lab.setToolTip("The view shows the projector's picture on every surface (UVs not used)." if mode == "projectors"
                                  else "The view shows the clip on assigned objects through their own UVs.")
+        self._projector_changed()
+
+    def edit_projector(self, fields, text="Edit projector"):
+        """One committed edit of the projector's fields (a number, a choice, a checkbox)."""
+        p = self.editor.state
+        if p is None:
+            return
+        fields = dict(fields)
+        if "h_fov" in fields:                                  # an angle, from older callers: as a throw ratio
+            fields["throw"] = 1 / (2 * math.tan(math.radians(fields.pop("h_fov")) / 2))
+        if "position" in fields and "target" not in fields:    # a typed body position moves like a drag:
+            delta = tuple(float(a) - b for a, b in zip(fields.pop("position"), p.position))   # aim kept only if asked
+            p = p.moved(delta, keep_aim=self.tool.keep_aim)
+        self._commit(p.with_(**fields), text)
+
+    def _commit(self, new, text):
+        """Every projector edit from the screen: one undoable step, or the reason it was refused, shown."""
+        self._refused = None
+        why = self.editor.commit(new, text)
+        if why:
+            self._refused = why
+            self._projector_changed()
 
     def add_projector(self):
-        """A projector where the view's camera is, aimed where it looks."""
-        self.projector = None
-        self.projector_from_view()
+        """A projector where the view's camera is, aimed where it looks (throw 1.5, 1920 × 1080)."""
+        eye, tgt = self.view._eye(), self.view.cam_target
+        self.view.look_through(False)
+        self._commit(Projector().placed((eye.x(), eye.y(), eye.z()), (tgt.x(), tgt.y(), tgt.z())), "Add projector")
+
+    def place_at_view(self):
+        """Move the projector to the view's camera, aimed where it looks: the pose only."""
+        v, p = self.view, self.editor.state
+        if p is None or v.looking_through:
+            return
+        eye, tgt = v._eye(), v.cam_target
+        self._commit(p.placed((eye.x(), eye.y(), eye.z()), (tgt.x(), tgt.y(), tgt.z())), "Place at view")
 
     def projector_from_view(self):
-        v = self.view
-        eye, tgt = v._eye(), v.cam_target
-        if v.looking_through and self.projector is not None:       # already looking through: nothing to take
+        """Match view: the pose, and the throw ratio that frames what the view shows."""
+        v, p = self.view, self.editor.state
+        if v.looking_through and p is not None:                # already looking through: nothing to take
             return
-        self.projector = from_view((eye.x(), eye.y(), eye.z()), (tgt.x(), tgt.y(), tgt.z()), 40.0,
-                                   max(1, v.width()) / max(1, v.height()),
-                                   (self.projector.image_aspect(self.clip_aspect) if self.projector else self.clip_aspect or 16 / 9),
-                                   base=self.projector)
-        self._projector_changed()
-        self.saver.changed()
-
-    def edit_projector(self, fields):
-        if self.projector is not None:
-            self.projector = self.projector.with_(**fields)
-            self._projector_changed()
-            self.saver.changed()
+        eye, tgt = v._eye(), v.cam_target
+        new = from_view((eye.x(), eye.y(), eye.z()), (tgt.x(), tgt.y(), tgt.z()), FOV, max(1, v.width()) / max(1, v.height()), base=p)
+        self._commit(new, "Match view" if p is not None else "Add projector")
 
     def remove_projector(self):
-        """The projector goes; the stage, its files and the UV assignments are untouched."""
+        """The projector goes (one undoable edit); the stage, its files and the UV assignments are untouched."""
         self.view.look_through(False)
-        had, self.projector = self.projector, None
+        self.tool.cancel()
+        if self.editor.state is not None:
+            self.editor.commit(None, "Remove projector")
+
+    def undo(self):
+        if self.tool.mode != "idle":
+            self.tool.cancel()
+        self.editor.undo()
+
+    def redo(self):
+        if self.tool.mode != "idle":
+            self.tool.cancel()
+        self.editor.redo()
+
+    def start_pick(self):
+        if self.editor.state is None or not self.stage:
+            return
+        if self.tabs.currentIndex() != 1:
+            self.tabs.setCurrentIndex(1)
+        self.view.look_through(False)
+        self.tool.start_pick()
+        self.view.setFocus()                                   # Escape reaches the workspace
+
+    def look_through(self, on):
+        self.tool.cancel()
+        self.view.look_through(on)
+
+    def exit_modes(self) -> bool:
+        """Escape: leave pick mode, drop a drag, or leave look-through. True if anything was left."""
+        if self.tool.cancel():
+            return True
+        if self.view.looking_through:
+            self.view.look_through(False)
+            return True
+        return False
+
+    def _on_look(self, on):
+        self.proj_panel.set_looking(on)
+        if on:
+            self._banner("Looking through the projector · navigation paused", "look", exit=True)
+        else:
+            self._banner("", "")
+        self._tool_state()
+
+    def _on_tool_mode(self, mode):
+        self.proj_panel.set_picking(mode == "pick")
+        self._tool_state()
+
+    def _tool_state(self):
+        self.tool.set_enabled(self.tabs.currentIndex() == 1 and self.editor.state is not None and not self.view.looking_through)
+
+    def _banner(self, text, kind, exit=False):
+        if not text:
+            if self.view.looking_through:                     # look-through keeps its own banner
+                text, kind, exit = "Looking through the projector · navigation paused", "look", True
+            else:
+                self.banner.hide()
+                return
+        bg, fg = BANNER.get(kind, BANNER["info"])
+        self.banner.setStyleSheet(f"QFrame {{ background: {bg}; border-radius: 8px; }} QLabel {{ color: {theme.T[fg]}; }}")
+        self.banner_lab.setText(text)
+        self.banner_exit.setVisible(exit or self.tool.mode == "pick")
+        self.banner_exit.setText("Exit" if exit else "Cancel")
+        self.banner.show()
+        self.banner.raise_()
+        self._overlay.place()
+
+    def _set_grid(self, on):
+        self.view.grid = bool(on)
+        self.view.update()
+
+    # ---- camera ---------------------------------------------------------------------------------
+    def set_view(self, kind):
+        self.tool.cancel()
+        self.view.set_view(kind)
+        self.hint_lab.hide()
+
+    def frame_all(self, reset=False):
+        self.tool.cancel()
+        self.view.frame_all(reset=reset)
+
+    def _on_view_kind(self, kind):
+        b = self.view_btns.get(kind)
+        if b is not None and not b.isChecked():
+            b.setChecked(True)
+
+    def frame_selected(self):
+        """The selected objects; in Projectors with nothing selected, the projector and its target."""
+        keys = self.selected_keys()
+        if keys and self.stage:
+            objs = [self.stage.object(k) for k in keys if self.stage.object(k) is not None]
+            lo, hi = _bounds(objs, self.stage.geometries)
+            self.tool.cancel()
+            self.view.frame_box(lo, hi)
+        elif self.tabs.currentIndex() == 1:
+            self.frame_projector()
+        else:
+            self.status.emit("Select objects in the list to frame them", False)
+
+    def frame_projector(self):
+        p = self.editor.state
+        if p is None:
+            return
+        pts = [p.position, p.target]
+        lo = tuple(min(q[i] for q in pts) for i in range(3))
+        hi = tuple(max(q[i] for q in pts) for i in range(3))
+        self.tool.cancel()
+        self.view.frame_box(lo, hi)
+
+    def _object_name(self, key):
+        o = self.stage.object(key) if self.stage else None
+        if o is None:
+            return key
+        if len(self.stage.sources) > 1:
+            src = self.stage.source_of(key)
+            return f"{o.display} ({self.stage.label(src)})" if src else o.display
+        return o.display
+
+    # ---- the projector shown ----------------------------------------------------------------------
+    def _on_committed(self):
+        self._refused = None
+        self.saver.changed()
+        self._centre_timer.start()
+
+    def _measure_centre(self):
+        """Where the middle of the beam meets the stage (one ray query), for the inspector."""
+        p = self.editor.state
+        self._centre = None
+        if p is not None and p.problem() is None and self.stage and self.view.isValid():
+            _r, _u, f = p.basis()
+            hit = self.view.query_ray(p.position, f)
+            if hit is None:
+                self._centre = {"miss": True}
+            else:
+                self._centre = {"name": self._object_name(hit[1]), "distance": math.dist(p.position, hit[0])}
         self._projector_changed()
-        if had is not None:
-            self.saver.changed()
 
     def _projector_changed(self):
-        self.view.set_projector(self.projector, self.clip_aspect)
-        vis = None
-        if self.projector is not None:
-            a = self.projector.image_aspect(self.clip_aspect)
-            vis = (VISIBILITY_SIZE, max(1, round(VISIBILITY_SIZE / a)))
-        self.proj_panel.show_state(bool(self.stage), self.projector, self.clip_aspect, vis)
+        shown = self.editor.shown
+        self.view.set_projector(shown, self.clip_aspect)
+        st = self.editor.stack
+        info = {"can_undo": st.canUndo(), "can_redo": st.canRedo(), "undo_text": st.undoText(), "redo_text": st.redoText(),
+                "refused": self._refused, "centre": self._centre if self.editor.preview is None else None}
+        if shown is not None:
+            pp = self.view.projection
+            info["vis"] = visibility_size(shown.aspect, (pp.limit if pp is not None and pp.limit else 16384))
+        self.proj_panel.show_state(bool(self.stage), shown, info)
+        self._tool_state()
 
     # ---- keyboard ------------------------------------------------------------------------------
     def closed_selector(self, w) -> bool:
@@ -1388,6 +1684,14 @@ class MappingScreen(QWidget):
     def handle_key(self, ev) -> bool:
         k, txt = ev.key(), ev.text()
         shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        cmd = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)     # ⌘ on a Mac
+        if k == Qt.Key.Key_Escape:
+            return self.exit_modes()
+        if cmd and k == Qt.Key.Key_Z and self.tabs.currentIndex() == 1:     # projector edits only, in their tab
+            (self.redo if shift else self.undo)()
+            return True
+        if cmd:
+            return False
         fps = max(1, round(float(self.ctx.rate))) if self.ctx else 25
         if k == Qt.Key.Key_Space:
             if not ev.isAutoRepeat():         # held down: one toggle, not play/pause flicker
