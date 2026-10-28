@@ -447,6 +447,11 @@ class PresetsScreen(QWidget):
         self.title = ElideLabel("")
         self.title.setStyleSheet("font-size: 15px; font-weight: 600;")
         hrow.addWidget(self.title, 1)
+        self.unsaved_lab = QLabel("Unsaved changes")
+        self.unsaved_lab.setProperty("faint", True)
+        self.unsaved_lab.setToolTip("Save spec keeps them. Use for this project saves them first, then makes this the project's spec.")
+        self.unsaved_lab.hide()
+        hrow.addWidget(self.unsaved_lab)
         self.active_chip = chip("Active for this project", "pass")
         hrow.addWidget(self.active_chip)
         self.use_btn = btn("Use for this project", "Re-evaluates stored measurements instantly, no re-decode", self._use, primary=True)
@@ -470,8 +475,11 @@ class PresetsScreen(QWidget):
 
     # ---- data -----------------------------------------------------------------------
     def refresh(self, select: str | None = None):
+        """Reload the specs. Unsaved edits to the spec on screen are kept (coming back to Specs is not a
+        reason to lose them); choosing another spec, New, or the project closing settle them first."""
         p = self.win.session.project
         self.data = service.presets(p)
+        keep = self.dirty and select is None and self.current is not None and self._by_id(self.current["id"]) is not None
         if self.editor is None:
             self.editor = PresetEditor(self.data["vocab"])
             self.editor.changed.connect(self._dirty)
@@ -496,9 +504,14 @@ class PresetsScreen(QWidget):
             self.list.addItem(it)
             if pr["id"] == want:
                 hit = it
-        self.dirty = False  # a refresh is an explicit reload; nothing to ask about
         self.list.setCurrentItem(hit or self.list.item(0))
         self.list.blockSignals(False)
+        if keep:                                     # the draft stays; only what the list says can change
+            active = self.current["id"] == self.data["active"]
+            self.active_chip.setVisible(active)
+            self.use_btn.setVisible(not active)
+            return
+        self.dirty = False
         self._show(self._by_id(want) or (self.data["presets"][0] if self.data["presets"] else None))
 
     def _by_id(self, pid):
@@ -510,7 +523,7 @@ class PresetsScreen(QWidget):
         pid = it.data(Qt.ItemDataRole.UserRole)
         if self.current and pid == self.current["id"]:
             return
-        if self.dirty and QMessageBox.question(self, "Unsaved changes", "Discard the changes to this spec?") != QMessageBox.StandardButton.Yes:
+        if not self.settle("Opening another spec"):
             self.list.blockSignals(True)
             self.list.setCurrentItem(prev)
             self.list.blockSignals(False)
@@ -526,6 +539,7 @@ class PresetsScreen(QWidget):
     def _show(self, pr: dict | None):
         self.current = pr
         self.dirty = False
+        self.unsaved_lab.hide()
         if not pr:
             return
         locked = bool(pr.get("builtin")) and not self._editable_default(pr)
@@ -548,6 +562,20 @@ class PresetsScreen(QWidget):
     def _dirty(self):
         self.dirty = True
         self.save_btn.setEnabled(True)
+        self.unsaved_lab.show()
+
+    def settle(self, action: str) -> bool:
+        """Before unsaved spec edits would be lost: save them (only if valid), drop them, or stop (False)."""
+        if not self.dirty or not self.current:
+            return True
+        choice = self.win.ask_unsaved("spec", f"“{self.current['name']}” has unsaved changes.", action)
+        if choice == "save":
+            return self._save(quiet=True)
+        if choice == "discard":
+            self.dirty = False
+            self.unsaved_lab.hide()
+            return True
+        return False
 
     # ---- actions ---------------------------------------------------------------------
     def _recheck_all(self, why: str):
@@ -598,6 +626,8 @@ class PresetsScreen(QWidget):
         return True
 
     def _new(self):
+        if not self.settle("Starting a new spec"):
+            return
         pid, _ = service.save_preset(self.win.session.project, {"name": "New delivery spec", "description": ""})
         self.refresh(pid)
         self.editor.name.setFocus()

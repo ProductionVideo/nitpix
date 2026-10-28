@@ -96,6 +96,7 @@ class Screens(unittest.TestCase):
                 if not jobs.active:
                     break
                 time.sleep(0.02)
+        self.win.ask_unsaved = lambda *_a: "discard"     # a test's leftover draft: quitting drops it
         self.win.close()
         self.win.deleteLater()
         self.app.processEvents()
@@ -271,6 +272,53 @@ class Screens(unittest.TestCase):
         self.assertEqual(ps.current["video"]["codecs"], ["prores"])
         ps._use()
         self.assertEqual(self.win.session.project.settings["preset_id"], ps.current["id"])
+
+    def test_spec_and_settings_drafts_survive_navigation_and_are_settled(self):
+        from unittest import mock
+        w, p = self.win, self.win.session.project
+        w.show_view("presets")
+        ps = w.presets
+        ps._new()
+        sid = ps.current["id"]
+        ps.editor.name.setText("Draft spec")
+        self.assertTrue(ps.dirty and ps.unsaved_lab.isVisibleTo(ps))
+        w.show_view("settings")
+        st = w.settings_screen
+        st.reviewer.setText("Draft reviewer")
+        for view in ("media", "dashboard", "presets", "settings"):               # harmless navigation keeps both drafts
+            w.show_view(view)
+        self.assertEqual((ps.current["id"], ps.editor.name.text()), (sid, "Draft spec"))
+        self.assertEqual(st.reviewer.text(), "Draft reviewer")
+        self.assertTrue(st.dirty())
+        asked = []
+        def answer(choice):
+            return lambda what, text, action: asked.append((what, action)) or choice
+        with mock.patch.object(w, "ask_unsaved", answer("cancel")):              # cancel: nothing closes or changes
+            self.assertFalse(w.close_project())
+            self.assertFalse(w.open_project(tempfile.mkdtemp(dir=self.tmp) + "/other.nitpix"))
+        self.assertIs(w.session.project, p)
+        self.assertEqual((ps.editor.name.text(), st.reviewer.text()), ("Draft spec", "Draft reviewer"))
+        self.assertEqual(asked, [("spec", "Closing the project"), ("spec", "Opening another project")])
+        ev = mock.Mock()
+        with mock.patch.object(w, "ask_unsaved", answer("cancel")):
+            w.closeEvent(ev)                                                     # quitting: cancelled too
+        ev.ignore.assert_called()
+        ps.editor.widgets[("video", "start_tc")].setText("ten o'clock")          # invalid: Save must not count as saved
+        with mock.patch.object(w, "ask_unsaved", answer("save")):
+            self.assertFalse(w.close_project())
+        self.assertIs(w.session.project, p)
+        ps.editor.widgets[("video", "start_tc")].setText("")
+        del asked[:]
+        with mock.patch.object(w, "ask_unsaved", answer("cancel")):              # New spec settles the draft first
+            ps._new()
+        self.assertEqual((ps.current["id"], asked), (sid, [("spec", "Starting a new spec")]))
+        with mock.patch.object(w, "ask_unsaved", answer("save")):
+            self.assertTrue(w.close_project())
+        self.assertIsNone(w.session.project)
+        w.open_project(str(p.folder))
+        q = w.session.project
+        self.assertEqual(q.settings["reviewer"], "Draft reviewer")
+        self.assertIn("Draft spec", [x["name"] for x in service.presets(q)["presets"]])
 
     def test_review_screen_stays_narrow(self):
         # a very long name and path must elide, not force the window wider than a laptop screen

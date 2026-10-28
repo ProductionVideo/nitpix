@@ -121,6 +121,7 @@ class Screen(unittest.TestCase):
                 if not jobs.active:
                     break
                 time.sleep(0.02)
+        self.win.ask_unsaved = lambda *_a: "discard"     # a test's leftover draft: quitting drops it
         self.win.close()
         self.win.deleteLater()
         self.app.processEvents()
@@ -172,8 +173,7 @@ class Screen(unittest.TestCase):
         self.open_default()
         ps.editor.widgets[("video", "width")].setText("640")
         self.assertTrue(ps.dirty)
-        from PySide6.QtWidgets import QMessageBox
-        with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+        with mock.patch.object(self.win, "ask_unsaved", return_value="discard"):
             ps.list.setCurrentRow(next(i for i in range(ps.list.count()) if ps.list.item(i).data(256) == "lhs_hd_prores_25"))
         self.assertEqual((ps.current["id"], self.custom_rows(), self.p.settings["preset_id"]), ("lhs_hd_prores_25", [], SRC))
 

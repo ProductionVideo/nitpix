@@ -515,17 +515,44 @@ class SettingsScreen(QWidget):
         form.addRow(drow)
         scroll.setWidget(box)
         outer.addWidget(scroll, 1)
+        self._loaded = None                      # the values last loaded or saved (None: nothing to protect)
+
+    def _values(self) -> tuple:
+        """What Save settings would write: compared with the last load to tell whether there are edits."""
+        return (self.name.text(), self.client.text(), self.reviewer.text(), self.preset.currentData(), self.workers.value(),
+                self.content.isChecked(), self.loudness.isChecked(), self.max_secs.value(), self.iina_cli.text(),
+                self.iina_mode.currentData(), self.iina_sock.text())
+
+    def dirty(self) -> bool:
+        return self._loaded is not None and self._values() != self._loaded
+
+    def settle(self, action: str) -> bool:
+        """Before unsaved settings would be lost: save them, drop them, or stop (False)."""
+        if not self.dirty():
+            return True
+        choice = self.win.ask_unsaved("settings", "This project's settings have unsaved changes.", action)
+        if choice == "save":
+            return self.save()
+        if choice == "discard":
+            self._loaded = None
+            return True
+        return False
 
     def refresh(self):
         p = self.win.session.project
         s = p.settings
+        if self.dirty():                         # coming back to Settings keeps what was typed
+            keep = self.preset.currentData()
+            if keep == self._loaded[3]:          # the spec was not edited here: follow a change made in Specs
+                keep = s.get("preset_id")
+                self._loaded = self._loaded[:3] + (keep,) + self._loaded[4:]
+            self._fill_presets(p, keep)
+            self._refresh_info()
+            return
         self.name.setText(s.get("project_name") or "")
         self.client.setText(s.get("client") or "")
         self.reviewer.setText(s.get("reviewer") or "")
-        self.preset.clear()
-        for pr in service.presets(p)["presets"]:
-            self.preset.addItem(pr["name"], pr["id"])
-        self.preset.setCurrentIndex(max(0, self.preset.findData(s.get("preset_id"))))
+        self._fill_presets(p, s.get("preset_id"))
         an = s["analysis"]
         self.workers.setValue(int(an.get("workers", 2)))
         self.content.setChecked(bool(an.get("content_checks", True)))
@@ -535,6 +562,16 @@ class SettingsScreen(QWidget):
         self.iina_cli.setText(ii.get("cli_path") or "")
         self.iina_mode.setCurrentIndex(max(0, self.iina_mode.findData(ii.get("socket_mode"))))
         self.iina_sock.setText(ii.get("fixed_socket") or "")
+        self._loaded = self._values()
+        self._refresh_info()
+
+    def _fill_presets(self, p, want):
+        self.preset.clear()
+        for pr in service.presets(p)["presets"]:
+            self.preset.addItem(pr["name"], pr["id"])
+        self.preset.setCurrentIndex(max(0, self.preset.findData(want)))
+
+    def _refresh_info(self):
         tv = tool_versions()
         mpv = f"libmpv {libmpv.version()} at {libmpv.LIBMPV}" if libmpv.available() else f"libmpv not found ({libmpv.MPV_ERROR}); the frame viewer is used instead"
         scr = self.window().screen() if self.window() else None
@@ -568,7 +605,7 @@ class SettingsScreen(QWidget):
         self.show_defaults()
         self.win.toast("New projects will start with nitpix's factory settings")
 
-    def save(self):
+    def save(self) -> bool:
         p = self.win.session.project
         patch = {"project_name": self.name.text().strip() or "Untitled delivery", "client": self.client.text().strip(),
                  "reviewer": self.reviewer.text().strip(), "preset_id": self.preset.currentData(),
@@ -582,8 +619,10 @@ class SettingsScreen(QWidget):
             ids = [r["id"] for r in p.q("SELECT id FROM assets")]
             if ids:
                 self.win.session.jobs.recheck(ids, reanalyse=False)
+        self._loaded = self._values()
         self.win.toast("Settings saved")
         self.win.refresh_rail()
+        return True
 
 
 # ---- main window ---------------------------------------------------------------------------
@@ -753,7 +792,7 @@ class MainWindow(QMainWindow):
         if self.session.project is not None:
             if self._scan_blocks("switching projects"):
                 return False
-            if not self.mapping_released("Opening another project"):
+            if not self.drafts_released("Opening another project") or not self.mapping_released("Opening another project"):
                 return False
         try:
             self.session.open(path, name, defaults=remembered_defaults())
@@ -822,7 +861,8 @@ class MainWindow(QMainWindow):
             self.session.jobs.scan_roots([str(loc["delivery"])])
 
     def close_project(self) -> bool:
-        if self._scan_blocks("closing the project") or not self.mapping_released("Closing the project"):
+        if self._scan_blocks("closing the project") or not self.drafts_released("Closing the project") \
+                or not self.mapping_released("Closing the project"):
             return False
         try:
             self._reset_mapping()
@@ -847,6 +887,25 @@ class MainWindow(QMainWindow):
             self.toast(f"Finish or cancel the running batch before {what}.", True)
             return True
         return False
+
+    def drafts_released(self, action: str) -> bool:
+        """Unsaved edits in Specs and Settings settled (saved, dropped) before the project goes; False keeps it open."""
+        return self.presets.settle(action) and self.settings_screen.settle(action)
+
+    def ask_unsaved(self, what: str, text: str, action: str) -> str:
+        """"save", "discard" or "cancel"."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(f"Unsaved {what}")
+        box.setText(text)
+        box.setInformativeText(f"{action} now would lose them.")
+        save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Don't save", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save)
+        box.setEscapeButton(cancel)
+        box.exec()
+        return {save: "save", discard: "discard"}.get(box.clickedButton(), "cancel")
 
     def mapping_released(self, action: str) -> bool:
         """Mapping's unsaved setup written into the project still open, before it closes. If that save
@@ -1316,7 +1375,7 @@ class MainWindow(QMainWindow):
         jobs = self.session.jobs
         if jobs and jobs.active and self.ask_quit_scan() != QMessageBox.StandardButton.Yes:
             return ev.ignore()                 # every question first: nothing is stopped or released yet
-        if self.session.project is not None and not self.mapping_released("Quitting"):
+        if self.session.project is not None and not (self.drafts_released("Quitting") and self.mapping_released("Quitting")):
             return ev.ignore()
         if jobs and jobs.active:
             jobs.cancel()
