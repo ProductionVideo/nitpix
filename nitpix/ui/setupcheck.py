@@ -19,8 +19,8 @@ import sys
 import time
 from collections import deque
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer
+from PySide6.QtGui import QCursor, QKeyEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -198,8 +198,18 @@ def run(app, win, shot: str):
     add(s_spaced, 600)
 
     # ---- pick the screen ----------------------------------------------------------------------
+    class Edges(QObject):                                             # what reaches the view meanwhile (evidence only)
+        def eventFilter(self, obj, ev):
+            if ev.type() in (QEvent.Type.Enter, QEvent.Type.Leave):
+                keep.setdefault("edges", []).append(("enter" if ev.type() == QEvent.Type.Enter else "leave",
+                                                     round(time.monotonic() - keep["t_hover"], 3)))
+            return False
+
     def s_hover():
         v = ms().view
+        keep["t_hover"] = time.monotonic()
+        keep["edge_filter"] = Edges(v)
+        v.installEventFilter(keep["edge_filter"])
         hover(v, pt((-1.6, 2.3, 0.0)))
         hover(v, pt(SCREEN))
     add(s_hover, 400)
@@ -209,7 +219,9 @@ def run(app, win, shot: str):
         h = m.tool.hover or {}
         check("Pick target: a marker on the screen under the cursor, with what it is and its distance",
               m.tool.mode == "pick" and h.get("name") == "Screen" and m.view.hit_marker is not None
-              and m.banner.isVisible() and "Screen" in m.banner_lab.text(), m.banner_lab.text())
+              and m.banner.isVisible() and "Screen" in m.banner_lab.text(),
+              f"{m.banner_lab.text()}; pointer edges at the view {keep.get('edges', [])}; real cursor {tuple(QCursor.pos().toTuple())}, "
+              f"view at {tuple(m.view.mapToGlobal(QPoint(0, 0)).toTuple())} {m.view.width()}×{m.view.height()}")
         win.grab().save(f"{base}-4-pick.png")
         hover(m.view, QPoint(m.view.width() - 20, 16))                     # empty space: a miss
     add(s_hovered, 400)
@@ -217,7 +229,9 @@ def run(app, win, shot: str):
     def s_miss():
         m = ms()
         check("Over empty space: no marker, said, nothing changes",
-              m.view.hit_marker is None and "No surface" in m.banner_lab.text() and m.projector.target == keep.get("t0", m.projector.target))
+              m.view.hit_marker is None and "No surface" in m.banner_lab.text() and m.projector.target == keep.get("t0", m.projector.target),
+              f"{m.banner_lab.text()}; pointer edges {keep.get('edges', [])}")
+        m.view.removeEventFilter(keep["edge_filter"])
         keep["before_pick"] = m.projector
         click(m.view, pt(SCREEN))
     add(s_miss, 600)
