@@ -118,6 +118,51 @@ class Screens(unittest.TestCase):
         self.assertEqual(self.win.current_view, "review")
         self.assertEqual(self.win.review.asset["id"], self.aid)
 
+    def test_report_scope_never_widens_to_the_whole_project(self):
+        from nitpix import reports
+        p = self.win.session.project
+        self.assertEqual(len(reports.collect(p)["assets"]), 2)                    # None: every asset
+        self.assertEqual([a["id"] for a in reports.collect(p, [self.bid])["assets"]], [self.bid])
+        with self.assertRaises(ValueError):
+            reports.collect(p, [])                                               # explicit and empty: refused
+        exports = p.safe_path("exports")
+        rs, media = self.win.reports_screen, self.win.media
+        self.win.show_view("media")
+        media.table.clearSelection()
+        self.win.show_view("reports")
+        rs.scope.setCurrentIndex(rs.scope.findData("selection"))
+        self.assertFalse(any(b.isEnabled() for b in rs.export_btns))
+        self.assertIn("No assets are selected", rs.scope_note.text())
+        before = set(exports.glob("*"))
+        rs._export("csv")                                                         # even if called: nothing written
+        self.assertEqual(set(exports.glob("*")), before)
+        self.win.show_view("media")
+        media.search.setText("no such clip")
+        self.win._refresh_list(force=True)
+        self.win.show_view("reports")
+        rs.scope.setCurrentIndex(rs.scope.findData("filter"))
+        self.assertIn("No assets match", rs.scope_note.text())
+        self.assertFalse(rs.export_btns[0].isEnabled())
+        self.win.show_view("media")
+        media.search.clear()
+        self.win._refresh_list(force=True)
+        from PySide6.QtCore import QItemSelectionModel
+        media.table.selectionModel().select(media.proxy.index(0, 0), QItemSelectionModel.SelectionFlag.ClearAndSelect
+                                            | QItemSelectionModel.SelectionFlag.Rows)
+        self.assertEqual(len(media.selected_ids()), 1)
+        self.win.show_view("reports")
+        rs.scope.setCurrentIndex(rs.scope.findData("selection"))
+        self.assertEqual(rs.scope_note.text(), "The report will cover 1 asset.")
+        rs._export("csv")
+        new = set(exports.glob("*")) - before
+        self.assertEqual(len(new), 1)
+        import csv
+        rows = list(csv.DictReader(open(new.pop())))
+        self.assertEqual({r["path"] for r in rows}, {p.asset(media.selected_ids()[0])["path"]})
+        rs.scope.setCurrentIndex(rs.scope.findData("all"))
+        self.assertEqual(rs.scope_note.text(), "The report will cover 2 assets.")
+        self.assertIn("does not follow the export scope", "".join(l.text() for l in rs.findChildren(type(rs.scope_note))))
+
     def test_review_screen_without_a_player(self):
         self.win.show_asset(self.aid)
         rv = self.win.review

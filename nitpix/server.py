@@ -478,7 +478,7 @@ def r_export(h, q):
     p = h.proj()
     b = h.body()
     fmt = b.get("format", "pdf")
-    ids = b.get("ids") or None
+    ids = b.get("ids")                       # absent / null: every asset; a list (even empty) is the scope
     fn = {"csv": reports.export_csv, "json": reports.export_json, "pdf": reports.export_pdf}.get(fmt)
     if not fn:
         raise ValueError("Unknown export format")

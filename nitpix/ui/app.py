@@ -33,6 +33,8 @@ from .widgets import ElideLabel, nav_icon, tidy_combo
 
 VIEWS = ["dashboard", "media", "review", "mapping", "presets", "reports", "settings"]   # number keys match the sidebar
 NAV = ["dashboard", "media", "review", "mapping", "presets", "reports", "settings"]   # the sidebar, top to bottom
+SCOPES = (("All assets", "all"), ("Assets matching the Media filter", "filter"), ("Selected assets", "selection"))
+SIGNOFF_LABEL = {"approved": "Approved for delivery", "approved_notes": "Approved with notes", "rejected": "Rejected — redeliver"}
 VIEW_LABEL = {"dashboard": "Dashboard", "media": "Media", "review": "Review", "presets": "Specs", "reports": "Reports",
               "settings": "Settings", "mapping": "Mapping"}
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -317,15 +319,21 @@ class ReportsScreen(QWidget):
         lay.addWidget(p)
         row = QHBoxLayout()
         self.scope = QComboBox()
-        self.scope.addItem("All assets", "all")
-        self.scope.addItem("Assets matching the Media filter", "filter")
-        self.scope.addItem("Selected assets", "selection")
+        for label, key in SCOPES:
+            self.scope.addItem(label, key)
+        self.scope.setToolTip("Which assets the exported report covers")
+        self.scope.currentIndexChanged.connect(lambda _i: self._show_scope())
         row.addWidget(self.scope)
-        for fmt in ("csv", "json", "pdf"):
-            row.addWidget(btn(f"Export {fmt.upper()}", "", lambda _, fmt=fmt: self._export(fmt)))
+        self.export_btns = [btn(f"Export {fmt.upper()}", "", lambda _, fmt=fmt: self._export(fmt)) for fmt in ("csv", "json", "pdf")]
+        for b in self.export_btns:
+            row.addWidget(b)
         row.addWidget(btn("Open exports folder", "", self._open_folder, ghost=True))
         row.addStretch(1)
         lay.addLayout(row)
+        self.scope_note = QLabel()                    # how many assets the export covers, or why it can't run
+        self.scope_note.setProperty("muted", True)
+        self.scope_note.setWordWrap(True)
+        lay.addWidget(self.scope_note)
         self.files = QListWidget()
         self.files.setFont(theme.mono(12))
         self.files.itemActivated.connect(lambda it: self._reveal(it.text()))
@@ -334,11 +342,15 @@ class ReportsScreen(QWidget):
         so.setObjectName("panel")
         form = QFormLayout(so)
         self.so_status = QComboBox()
-        for k, l in (("approved", "Approved for delivery"), ("approved_notes", "Approved with notes"), ("rejected", "Rejected — redeliver")):
+        for k, l in SIGNOFF_LABEL.items():
             self.so_status.addItem(l, k)
         self.so_by = QLineEdit()
         self.so_note = QLineEdit()
         form.addRow(QLabel("<b>Batch sign-off</b>"))
+        so_scope = QLabel("One decision for the whole project, recorded in every report. It does not follow the export scope above.")
+        so_scope.setProperty("muted", True)
+        so_scope.setWordWrap(True)
+        form.addRow(so_scope)
         form.addRow("Decision", self.so_status)
         form.addRow("Signed by", self.so_by)
         form.addRow("Note", self.so_note)
@@ -359,7 +371,18 @@ class ReportsScreen(QWidget):
             self.files.addItem(f.name)
         so = p.get_meta("signoff")
         self.so_by.setText((so or {}).get("by") or p.settings.get("reviewer") or "")
-        self.so_state.setText(f"Signed off: {so['status']} by {so['by']} · {time.strftime('%d %b %Y %H:%M', time.localtime(so['at']))}" if so else "Not signed off yet.")
+        self._show_scope()
+        self.so_state.setText(f"Signed off: {SIGNOFF_LABEL.get(so['status'], so['status'])} by {so['by']} · {time.strftime('%d %b %Y %H:%M', time.localtime(so['at']))}" if so else "Not signed off yet.")
+
+    def _show_scope(self):
+        ids = self._ids()
+        n = len(ids) if ids is not None else len(service.list_assets(self.win.session.project))
+        for b in self.export_btns:
+            b.setEnabled(n > 0)
+        why = {"filter": "No assets match the Media filter. Change the filter in Media, or export All assets.",
+               "selection": "No assets are selected. Select assets in Media, or export All assets.",
+               "all": "This project has no assets yet."}
+        self.scope_note.setText(f"The report will cover {n} asset{'s' if n != 1 else ''}." if n else why[self.scope.currentData()])
 
     def _ids(self):
         s = self.scope.currentData()

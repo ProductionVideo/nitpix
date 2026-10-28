@@ -28,8 +28,12 @@ def position_label(asset: dict, frame):
 
 
 def collect(project, asset_ids=None) -> dict:
+    """The report's data. asset_ids None: every asset. A list is an explicit scope; an empty one is refused,
+    never widened to the whole project."""
     s = project.settings
-    if asset_ids:
+    if asset_ids is not None and not asset_ids:
+        raise ValueError("No assets in this scope, so there is nothing to export.")
+    if asset_ids is not None:
         qmarks = ",".join("?" * len(asset_ids))
         rows = project.q(f"SELECT id FROM assets WHERE id IN ({qmarks}) ORDER BY dir, name", asset_ids)
     else:
