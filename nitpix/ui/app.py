@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 from .. import __version__, defaults, demo, libmpv, reports, service, updates, variant
 from ..probe import tool_versions
 from ..store import recent_projects
-from . import deps, display, theme
+from . import deps, display, macaccess, theme
 from .media import AssetModel, MediaScreen, setup_columns
 from .mpvwidget import gl_format
 from .presets import PresetsScreen
@@ -1688,6 +1688,7 @@ def run(project: str | None = None) -> int:
     QSurfaceFormat.setDefaultFormat(gl_format())
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("nitpix-exp" if variant.IS_EXPERIMENTAL else "nitpix")
+    macaccess.guard()                 # a Qt crash when assistive tools read a table's selection (nitpix/ui/macaccess.py)
     app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "web" / "branding" / "app-icon.png")))
     theme.load_fonts()
     app.setStyleSheet(theme.STYLESHEET)

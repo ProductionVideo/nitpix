@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import os
 import statistics
+import sys
 import time
 from collections import deque
 
@@ -24,6 +25,29 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 SCREEN = (0.0, 1.625, 0.0)                     # the demo screen's centre
+
+
+def hover(w, pos):
+    """Move the pointer over w without a button. On macOS a native mouse-moved event posted to this
+    process only (the real cursor is not moved; no other app gets it), so it arrives the way a
+    trackpad's would; a synthetic Qt move can be undone by the real pointer's enter/leave events
+    while it rests elsewhere. Elsewhere, QTest."""
+    if sys.platform == "darwin":
+        import ctypes
+        cg = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+
+        class P(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+        cg.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+        cg.CGEventCreateMouseEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, P, ctypes.c_uint32]
+        cg.CGEventPostToPid.argtypes = [ctypes.c_int, ctypes.c_void_p]
+        cg.CFRelease.argtypes = [ctypes.c_void_p]
+        g = w.mapToGlobal(pos)
+        e = cg.CGEventCreateMouseEvent(None, 5, P(g.x(), g.y()), 0)        # kCGEventMouseMoved
+        cg.CGEventPostToPid(os.getpid(), e)
+        cg.CFRelease(e)
+    else:
+        QTest.mouseMove(w, pos)
 
 
 def run(app, win, shot: str):
@@ -176,8 +200,8 @@ def run(app, win, shot: str):
     # ---- pick the screen ----------------------------------------------------------------------
     def s_hover():
         v = ms().view
-        QTest.mouseMove(v, pt((-1.6, 2.3, 0.0)))
-        QTest.mouseMove(v, pt(SCREEN))
+        hover(v, pt((-1.6, 2.3, 0.0)))
+        hover(v, pt(SCREEN))
     add(s_hover, 400)
 
     def s_hovered():
@@ -187,7 +211,7 @@ def run(app, win, shot: str):
               m.tool.mode == "pick" and h.get("name") == "Screen" and m.view.hit_marker is not None
               and m.banner.isVisible() and "Screen" in m.banner_lab.text(), m.banner_lab.text())
         win.grab().save(f"{base}-4-pick.png")
-        QTest.mouseMove(m.view, QPoint(m.view.width() - 20, 16))           # empty space: a miss
+        hover(m.view, QPoint(m.view.width() - 20, 16))                     # empty space: a miss
     add(s_hovered, 400)
 
     def s_miss():
