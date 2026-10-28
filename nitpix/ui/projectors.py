@@ -34,6 +34,10 @@ class _Spin(QDoubleSpinBox):
         self.setKeyboardTracking(False)
         self.setAccelerated(True)
         self.setMinimumWidth(60)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)     # not by the wheel: scrolling the panel never edits a number
+
+    def wheelEvent(self, ev):
+        ev.ignore()                                          # the panel scrolls; numbers change by typing or the arrows
 
     def keyPressEvent(self, ev):
         if ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):

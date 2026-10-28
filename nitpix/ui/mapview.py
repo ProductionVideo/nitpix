@@ -170,6 +170,10 @@ class MappingView(MpvWidget):
         f.setDepthBufferSize(24)
         self.setFormat(f)
         self.setMinimumSize(320, 200)
+        # A click in the view takes the keyboard (the QC player keeps NoFocus): a number being typed
+        # in the inspector is committed as it loses focus, and Space, arrows and F reach the
+        # workspace again without pressing Enter first.
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         # scene and assignments (from the Mapping screen)
         self.scene = None
         self.assigned = {}               # object key -> UV set
@@ -322,6 +326,7 @@ class MappingView(MpvWidget):
         return proj * view
 
     def mousePressEvent(self, e):
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         pan = e.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton) or e.modifiers() & Qt.KeyboardModifier.ShiftModifier
         self._drag = ("pan" if pan else "orbit", e.position())
         self.camera_input.emit()

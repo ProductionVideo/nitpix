@@ -893,8 +893,9 @@ class OneSession(unittest.TestCase):
 
     def test_projector_numbers_keep_their_keys_and_space_plays_after(self):
         """Typing in a number never reaches the transport or the screen keys; Enter commits it and
-        hands the keys back, so Space plays."""
-        from PySide6.QtCore import Qt
+        hands the keys back, so Space plays. So does a click or drag in the view, without Enter."""
+        from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+        from PySide6.QtGui import QKeyEvent, QWheelEvent
         from PySide6.QtTest import QTest
         w = self.window()
         w.show()
@@ -920,6 +921,44 @@ class OneSession(unittest.TestCase):
         self.assertIsNot(QApplication.focusWidget(), spin)
         QTest.keyClick(QApplication.focusWidget() or w, Qt.Key.Key_Space)
         self.assertEqual(toggles, [1])
+        # No Enter: a click or a drag in the view commits the number and gives Space back
+        for gesture in ("click", "drag"):
+            with self.subTest(gesture):
+                toggles.clear()
+                QTest.mouseClick(spin, Qt.MouseButton.LeftButton)
+                pump(self.app, timeout=0.05)
+                self.assertIs(QApplication.focusWidget(), spin)
+                spin.selectAll()
+                QTest.keyClicks(spin, "4" if gesture == "click" else "5")
+                QTest.keyClick(spin, Qt.Key.Key_Space)
+                QTest.keyClick(spin, Qt.Key.Key_Right)                       # the field's caret, not a frame step
+                self.assertEqual(toggles, [])
+                c = ms.view.rect().center()
+                if gesture == "click":
+                    QTest.mouseClick(ms.view, Qt.MouseButton.LeftButton, pos=c)
+                else:
+                    QTest.mousePress(ms.view, Qt.MouseButton.LeftButton, pos=c)
+                    QTest.mouseMove(ms.view, c + QPoint(30, 5))
+                    QTest.mouseRelease(ms.view, Qt.MouseButton.LeftButton, pos=c + QPoint(30, 5))
+                pump(self.app, timeout=0.05)
+                self.assertIs(QApplication.focusWidget(), ms.view)
+                self.assertEqual(ms.projector.position[0], 4.0 if gesture == "click" else 5.0)   # committed, valid
+                QTest.keyClick(ms.view, Qt.Key.Key_Space)
+                held = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier, " ", True)
+                QApplication.sendEvent(ms.view, held)                        # held: still one toggle
+                self.assertEqual(toggles, [1])
+        spin.setFocus()                                                      # Escape drops what was typed and gives the keys back
+        pump(self.app, timeout=0.05)
+        spin.selectAll()
+        QTest.keyClicks(spin, "9")
+        QTest.keyClick(spin, Qt.Key.Key_Escape)
+        pump(self.app, timeout=0.05)
+        self.assertEqual(ms.projector.position[0], 5.0)
+        self.assertIsNot(QApplication.focusWidget(), spin)
+        before = spin.value()                                                # the wheel never edits a number
+        QApplication.sendEvent(spin, QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, 120), Qt.MouseButton.NoButton,
+                                                 Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
+        self.assertEqual((spin.value(), ms.projector.position[0]), (before, 5.0))
 
     def test_space_on_the_closed_clip_or_uv_selector_plays(self):
         """Through the window's key routing, focus left on a selector after choosing from it."""
