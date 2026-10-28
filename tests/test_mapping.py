@@ -1004,6 +1004,75 @@ class OneSession(unittest.TestCase):
         self.assertEqual(w.current_view, "start")
         self.assertFalse(w.review.released)
 
+    def test_a_failed_save_keeps_the_project_open_until_the_user_decides(self):
+        w = self.window()
+        w.show_view("mapping")                                               # restores (nothing saved yet) and binds the saver
+        ms, p = w.mapping, w.session.project
+        ms._replace_with([load_scene(os.path.join(FIX, "stage.obj"))])
+        ms.flush()
+        good = p.get_meta("mapping.setup")
+        asked = []
+        answers = []
+        w.ask_unsaved_mapping = lambda action, why: (asked.append((action, why)), answers.pop(0))[1]
+        broken = mock.patch.object(p, "set_meta", side_effect=OSError("disk full"))
+        broken.start()
+        ms.view.orbit(40, 0)                                                 # an unsaved change
+        answers[:] = ["cancel", "retry", "cancel", "cancel"]
+        self.assertFalse(w.close_project())
+        self.assertFalse(w.open_project(tempfile.mkdtemp(dir=self.tmp) + "/other.nitpix"))   # retried, failed again, then kept
+        self.assertFalse(w.close())                                          # quitting is refused before anything stops
+        self.assertEqual([a for a, _ in asked], ["Closing the project", "Opening another project", "Opening another project", "Quitting"])
+        self.assertIn("disk full", asked[0][1])
+        self.assertIs(w.session.project, p)                                  # nothing closed, reset or torn down
+        self.assertEqual(w.current_view, "mapping")
+        self.assertTrue(ms.scene)
+        self.assertIs(ms.saver.project, p)                                   # still bound: the next change or Retry saves
+        self.assertEqual(ms.saver.state, "error")
+        broken.stop()
+        answers[:] = ["retry"]                                               # the disk is back: Retry saves, then closes
+        p.set_meta("mapping.setup", good)
+        broken = mock.patch.object(p, "set_meta", side_effect=[OSError("disk full"), None])
+        broken.start()
+        ms.view.orbit(10, 0)
+        self.assertTrue(w.close_project())
+        broken.stop()
+        self.assertIsNone(w.session.project)
+
+    def test_discarding_unsaved_mapping_changes_closes_without_writing(self):
+        w = self.window()
+        w.show_view("mapping")
+        ms, p = w.mapping, w.session.project
+        ms._replace_with([load_scene(os.path.join(FIX, "stage.obj"))])
+        ms.flush()
+        good = p.get_meta("mapping.setup")
+        w.ask_unsaved_mapping = lambda action, why: "discard"
+        with mock.patch.object(p, "set_meta", side_effect=OSError("read-only")) as sm:
+            ms.view.orbit(40, 0)
+            folder = str(p.folder)
+            self.assertTrue(w.close_project())
+            calls = sm.call_count
+        self.assertEqual(calls, 1)                                           # the failed attempt only: nothing after the choice
+        self.assertIsNone(w.session.project)
+        from nitpix.store import Project
+        q = Project(folder)
+        self.assertEqual(q.get_meta("mapping.setup"), good)                  # the last good save is what the project keeps
+        q.close()
+
+    def test_nothing_to_lose_asks_nothing(self):
+        w = self.window()
+        w.ask_unsaved_mapping = lambda *a: self.fail("asked with nothing at risk")
+        self.assertTrue(w.close_project())                                   # Mapping never opened
+        w.open_project(tempfile.mkdtemp(dir=self.tmp) + "/r.nitpix")
+        w.show_view("mapping")
+        ms = w.mapping
+        ms.saver.suspended = True                                            # a restore under way: writes nothing, loses nothing
+        with mock.patch.object(w.session.project, "set_meta", side_effect=OSError("x")):
+            ms.saver.state = "pending"
+            self.assertIsNone(ms.settle())
+            ms.saver.suspended = False
+            ms.saver.unbind()                                                # no project bound
+            self.assertIsNone(ms.settle())
+
 
 if __name__ == "__main__":
     unittest.main()

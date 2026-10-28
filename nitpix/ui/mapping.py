@@ -385,6 +385,18 @@ class MappingScreen(QWidget):
         """Save now if there are unsaved changes (before the project closes or the app quits)."""
         return self.saver.flush()
 
+    def settle(self) -> str | None:
+        """Before the project closes: write any unsaved change. None when nothing would be lost (saved,
+        nothing to save, no project, or a restore under way, which changes nothing saved); otherwise
+        why the save failed, with the live setup and the project left as they are."""
+        if self.saver.project is None or self.saver.suspended or self.saver.flush():
+            return None
+        return (self.saver.detail or "the save failed") if self.saver.state == "error" else None
+
+    def discard_unsaved(self):
+        """The user chose to go on without the changes that could not be saved: nothing more is written."""
+        self.saver.unbind()
+
     def reset_project(self):
         """Another project (or none): drop the stage, assignments, clip and any import in progress.
         The caller flushes first, while the old project is still open; nothing is written here."""

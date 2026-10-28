@@ -674,19 +674,21 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, ev)
 
     # ---- project lifecycle -------------------------------------------------------
-    def open_project(self, path: str, name: str | None = None):
-        if self.mapping is not None:
-            self.mapping.flush()                   # into the project still open, before it closes
+    def open_project(self, path: str, name: str | None = None) -> bool:
+        """False when it did not open: an error, or the user kept the current project open."""
+        if self.session.project is not None and not self.mapping_released("Opening another project"):
+            return False
         try:
             self.session.open(path, name)
         except Exception as e:
             self.toast(str(e), True)
-            return
+            return False
         self._reset_mapping()
         self.review.asset = None
         self.review.released = False
         self.refresh_rail()
         self.show_view("dashboard")
+        return True
 
     def open_dialog(self):
         d = QFileDialog.getExistingDirectory(self, "Open a project folder (.nitpix)")
@@ -711,8 +713,8 @@ class MainWindow(QMainWindow):
         form.addRow(bb)
         if dlg.exec() == QDialog.DialogCode.Accepted and name.text().strip():
             slug = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name.text().strip()).strip().replace(" ", "_")
-            self.open_project(os.path.join(folder.text().strip(), slug + ".nitpix"), name.text().strip())
-            self.add_media()
+            if self.open_project(os.path.join(folder.text().strip(), slug + ".nitpix"), name.text().strip()):
+                self.add_media()
 
     def load_demo(self):
         loc = demo.locations()
@@ -734,14 +736,13 @@ class MainWindow(QMainWindow):
         if err:
             return self.toast("Demo generation failed: " + err[-300:], True)
         loc = demo.locations()
-        self.open_project(str(loc["project"]), demo.PROJECT_NAME)
-        if self.session.project:
+        if self.open_project(str(loc["project"]), demo.PROJECT_NAME) and self.session.project:
             self.session.project.update_settings({"client": "Demo client", "preset_id": "lhs_hd_prores_25"})
             self.session.jobs.scan_roots([str(loc["delivery"])])
 
-    def close_project(self):
-        if self.mapping is not None:
-            self.mapping.flush()
+    def close_project(self) -> bool:
+        if not self.mapping_released("Closing the project"):
+            return False
         try:
             self._reset_mapping()
             self.review.player.unload()
@@ -750,10 +751,42 @@ class MainWindow(QMainWindow):
             self.session.close()
         except Exception as e:
             self.toast(str(e), True)
-            return
+            return False
         self.start.refresh()
         self.show_view("start")
         self.refresh_rail()
+        return True
+
+    def mapping_released(self, action: str) -> bool:
+        """Mapping's unsaved setup written into the project still open, before it closes. If that save
+        fails, the user chooses: try again, go on without those changes, or keep the project open
+        (False: nothing has been closed, stopped or torn down)."""
+        if self.mapping is None:
+            return True
+        while (why := self.mapping.settle()) is not None:
+            choice = self.ask_unsaved_mapping(action, why)
+            if choice == "discard":
+                self.mapping.discard_unsaved()
+                return True
+            if choice != "retry":
+                return False
+        return True
+
+    def ask_unsaved_mapping(self, action: str, why: str) -> str:
+        """"retry", "discard" or "cancel"."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Mapping setup not saved")
+        box.setText("The Mapping setup could not be saved into the project.")
+        box.setInformativeText(f"{why}\n\n{action} now would lose the Mapping changes made since the last save. "
+                               "The rest of the project is not affected.")
+        retry = box.addButton("Retry save", QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Don't save Mapping changes", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(retry)
+        box.setEscapeButton(cancel)
+        box.exec()
+        return {retry: "retry", discard: "discard"}.get(box.clickedButton(), "cancel")
 
     # ---- Mapping ------------------------------------------------------------------------------
     def ensure_mapping(self):
@@ -1186,6 +1219,8 @@ class MainWindow(QMainWindow):
             self.toast_lab.move((self.width() - self.toast_lab.width()) // 2, self.height() - self.toast_lab.height() - 24)
 
     def closeEvent(self, ev):
+        if self.session.project is not None and not self.mapping_released("Quitting"):
+            return ev.ignore()                 # before anything is stopped or released
         jobs = self.session.jobs
         if jobs and jobs.active:
             if QMessageBox.question(self, "Quit", "A scan is running. Cancel it and quit?") != QMessageBox.StandardButton.Yes:
