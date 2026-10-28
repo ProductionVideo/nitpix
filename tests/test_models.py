@@ -128,7 +128,7 @@ class Document(unittest.TestCase):
         d = mapsave.validate(copy.deepcopy(GOOD))
         self.assertEqual(d["next_id"], 3)                                    # never below a saved id
         p = mapsave.projector_from(d["projectors"][0])
-        self.assertEqual((p.position, p.h_fov, p.show_frustum), ((0.0, 2.0, 10.0), 30.0, False))
+        self.assertEqual((p.position, round(p.h_fov, 9), p.show_frustum), ((0.0, 2.0, 10.0), 30.0, False))   # migrated from version 1
         self.assertEqual(mapsave.projector_to(p)["position"], [0.0, 2.0, 10.0])
 
     def test_what_is_refused(self):
@@ -138,6 +138,7 @@ class Document(unittest.TestCase):
                ("tab", {**GOOD, "tab": "lights"}), ("camera", {**GOOD, "camera": {"yaw": 1, "pitch": 1, "dist": 0, "target": [0, 0, 0]}}),
                ("nan", {**GOOD, "camera": {"yaw": float("nan"), "pitch": 1, "dist": 1, "target": [0, 0, 0]}}),
                ("fov", {**GOOD, "projectors": [{**GOOD["projectors"][0], "h_fov": 500}]}),
+               ("view", {**GOOD, "camera": {**GOOD["camera"], "view": "iso"}}),
                ("two", {**GOOD, "projectors": GOOD["projectors"] * 2}),
                ("checksum", {**GOOD, "resources": {"abc": {**GOOD["resources"]["abc"], "sha256": "short"}}}),
                ("bool as number", {**GOOD, "clip": True})]

@@ -1,43 +1,54 @@
 """One virtual projector for the Mapping preview: plain state and its geometry. No Qt, no GL: the
-Mapping screen edits it, nitpix/ui/projection.py draws with it, and tests check it directly.
+Mapping screen edits it (nitpix/ui/projedit.py), nitpix/ui/projection.py draws with it, and tests
+check it directly.
 
 A geometric preview, not a projector model: it places the current picture on the stage the way a
-pinhole projector at `position`, aimed at `target`, would. No lens shift, brightness, colour or
-calibration.
+pinhole projector at `position`, aimed at `target`, would. No lens shift, brightness, colour, focus
+or calibration.
 
 Coordinates are the stage's (nitpix/scene.py): metres, Y up; the audience side of an exported
 stage is usually +Z.
 
 - Aim: the projector looks from `position` towards `target`. A target at the position itself
-  has no direction; `problem()` says so and nothing is projected.
-- Roll is never set by hand: the image's top edge stays towards +Y (world up). Aimed within 0.5°
-  of straight down or up, where "up" has no meaning, the image's top points towards -Z (upstage),
-  so a floor projection reads the right way up from the audience. The image turns quickly as the
-  aim passes near vertical; that is the geometry, not a bug.
-- `h_fov` is the full horizontal angle of the image in degrees. The vertical angle follows from
-  the image aspect: tan(v/2) = tan(h/2) / aspect. Throw ratio (distance / image width) is
-  1 / (2·tan(h/2)), shown, not edited, so the two can never disagree.
-- `aspect` None follows the current clip (its display width / height); a number overrides it.
-
-Session only, like the rest of Mapping: nothing here is saved yet, but the state is plain values
-so a later save/reopen can store it as is.
+  has no direction; `problem()` says so and nothing is projected. Aiming (picking a target)
+  keeps the position and the roll.
+- Orientation: with roll 0 the image's top edge stays towards +Y (world up), so the horizon is
+  level whatever the pan and tilt. Aimed within 0.5° of straight down or up, where "up" has no
+  meaning, the top points towards -Z (upstage) for down and +Z for up, so a floor projection reads
+  the right way up from the audience. Near vertical a small change of aim can turn the image
+  quickly; that is the geometry of pan and tilt, and `roll` sets it by hand.
+- `roll` turns the image about the aim, in degrees; positive turns its top towards the right as
+  seen from behind the projector.
+- `throw` is the width-based throw ratio: distance / image width, so at distance D the image is
+  D / throw wide. It is the only stored lens value: the horizontal angle `h_fov` follows from it,
+  tan(h/2) = 1 / (2 throw), so the two can never disagree.
+- `raster` is the projector's native image in pixels (width, height): the beam's shape. It never
+  follows the clip. `fit` says how the clip sits in it: "fit" keeps the clip's shape, centred, and
+  the bars beside or above it project nothing; "stretch" fills the raster.
+- `raster_note` "inferred" marks a raster worked out from an earlier preview's aspect (a saved
+  setup from before rasters existed), not one chosen for real hardware.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
 
-DEFAULT_ASPECT = 16 / 9
 VERTICAL = math.cos(math.radians(0.5))      # |forward . Y| above this: aimed (almost) straight up or down
-MIN_FOV, MAX_FOV = 1.0, 150.0
+MIN_THROW, MAX_THROW = 0.13, 60.0            # about 150° to 1° wide
+MIN_RASTER, MAX_RASTER = 16, 16384
+FITS = ("fit", "stretch")
+RASTERS = ((1920, 1080), (1920, 1200), (3840, 2160), (4096, 2160), (2560, 1600), (1400, 1050))
 
 
 @dataclass(frozen=True)
 class Projector:
     position: tuple = (0.0, 2.0, 10.0)
     target: tuple = (0.0, 2.0, 0.0)
-    h_fov: float = 30.0                     # degrees, the whole image width
-    aspect: float | None = None             # None: from the clip
+    roll: float = 0.0                       # degrees about the aim
+    throw: float = 1.5                      # distance / image width
+    raster: tuple = (1920, 1080)            # native pixels: the beam's shape
+    fit: str = "fit"                        # how the clip sits in the raster
+    raster_note: str = ""                   # "inferred": from an earlier preview's aspect
     enabled: bool = True
     show_frustum: bool = True
 
@@ -49,19 +60,43 @@ class Projector:
         """Why nothing can be projected, or None."""
         if math.dist(self.position, self.target) < 1e-6:
             return "The target is at the projector's position: move one of them to aim it."
-        if not MIN_FOV <= self.h_fov <= MAX_FOV:
-            return f"The field of view must be between {MIN_FOV:g}° and {MAX_FOV:g}°."
+        if not MIN_THROW <= self.throw <= MAX_THROW:
+            return f"The throw ratio must be between {MIN_THROW:g} and {MAX_THROW:g}."
+        if not all(MIN_RASTER <= n <= MAX_RASTER for n in self.raster):
+            return f"The native raster must be between {MIN_RASTER} and {MAX_RASTER} pixels each way."
         return None
 
-    def image_aspect(self, clip_aspect: float | None) -> float:
-        a = self.aspect if self.aspect else clip_aspect
-        return a if a and a > 0 else DEFAULT_ASPECT
+    @property
+    def h_fov(self) -> float:
+        """The full horizontal angle of the image, in degrees (from the throw ratio)."""
+        return math.degrees(2 * math.atan(1 / (2 * self.throw)))
 
-    def throw_ratio(self) -> float:
-        return 1.0 / (2.0 * math.tan(math.radians(self.h_fov) / 2))
+    @property
+    def aspect(self) -> float:
+        return self.raster[0] / self.raster[1]
+
+    def image_aspect(self, clip_aspect: float | None = None) -> float:
+        """The beam's width / height: the raster's, whatever the clip."""
+        return self.aspect
 
     def distance(self) -> float:
         return math.dist(self.position, self.target)
+
+    def image_size(self, dist: float | None = None) -> tuple[float, float]:
+        """The ideal image (width, height) in metres on a plane square to the aim at `dist` (the
+        target's distance by default): not the size on a tilted or curved surface."""
+        d = self.distance() if dist is None else dist
+        w = d / self.throw
+        return w, w / self.aspect
+
+    def content_rect(self, clip_aspect: float | None) -> tuple[float, float, float, float]:
+        """Where the clip sits in the raster, as (left, bottom, width, height) in 0-1 image units."""
+        if self.fit == "stretch" or not clip_aspect or clip_aspect <= 0:
+            return 0.0, 0.0, 1.0, 1.0
+        r = clip_aspect / self.aspect
+        if r >= 1:                          # wider than the raster: bars above and below
+            return 0.0, (1 - 1 / r) / 2, 1.0, 1 / r
+        return (1 - r) / 2, 0.0, r, 1.0     # narrower: bars at the sides
 
     def basis(self):
         """(right, up, forward) unit vectors; forward points from the projector to the target."""
@@ -72,6 +107,10 @@ class Projector:
             world_up = (0.0, 0.0, -1.0) if f[1] < 0 else (0.0, 0.0, 1.0)
         r = _norm(_cross(f, world_up))
         u = _cross(r, f)
+        if self.roll:
+            a = math.radians(self.roll)
+            c, s = math.cos(a), math.sin(a)
+            r, u = _add(_mul(r, c), _mul(u, -s)), _add(_mul(u, c), _mul(r, s))
         return r, u, f
 
     def view(self) -> list:
@@ -83,10 +122,10 @@ class Projector:
                 [-f[0], -f[1], -f[2], _dot(f, p)],
                 [0.0, 0.0, 0.0, 1.0]]
 
-    def projection(self, aspect: float, near: float, far: float) -> list:
+    def projection(self, near: float, far: float) -> list:
         """4x4 row-major perspective of the image (clip w = distance along the aim)."""
-        th = math.tan(math.radians(self.h_fov) / 2)
-        tv = th / aspect
+        th = 1 / (2 * self.throw)
+        tv = th / self.aspect
         return [[1 / th, 0.0, 0.0, 0.0],
                 [0.0, 1 / tv, 0.0, 0.0],
                 [0.0, 0.0, -(far + near) / (far - near), -2 * far * near / (far - near)],
@@ -100,24 +139,47 @@ class Projector:
         far = max(far * 1.01, 0.01)
         return max(far * 1e-4, 1e-3), far
 
-    def corners(self, aspect: float, dist: float) -> list:
+    def corners(self, dist: float) -> list:
         """The image's corners at `dist` along the aim: top-left, top-right, bottom-right, bottom-left."""
         r, u, f = self.basis()
-        th = math.tan(math.radians(self.h_fov) / 2)
-        w, h = th * dist, th / aspect * dist
+        w, h = self.image_size(dist)
         c = _add(self.position, _mul(f, dist))
-        return [_add(c, _add(_mul(r, sx * w), _mul(u, sy * h))) for sx, sy in ((-1, 1), (1, 1), (1, -1), (-1, -1))]
+        return [_add(c, _add(_mul(r, sx * w / 2), _mul(u, sy * h / 2))) for sx, sy in ((-1, 1), (1, 1), (1, -1), (-1, -1))]
+
+    # ---- edits (each returns a new Projector) -------------------------------------------
+    def aimed_at(self, point) -> "Projector":
+        """Aimed at `point`: the position and roll stay."""
+        return self.with_(target=tuple(float(c) for c in point))
+
+    def moved(self, delta, keep_aim: bool = False) -> "Projector":
+        """The body moved by `delta`. It keeps its orientation (the target moves with it) unless
+        `keep_aim`, when the target stays and the projector turns to it."""
+        pos = _add(self.position, delta)
+        return self.with_(position=pos) if keep_aim else self.with_(position=pos, target=_add(self.target, delta))
+
+    def placed(self, eye, look_at) -> "Projector":
+        """Moved to `eye`, aimed at `look_at`: the pose only; throw, raster and roll stay."""
+        return self.with_(position=tuple(float(c) for c in eye), target=tuple(float(c) for c in look_at))
 
 
-def from_view(eye, target, v_fov: float, view_aspect: float, image_aspect: float, base: Projector | None = None) -> Projector:
-    """A projector where the orbit camera is, aimed where it looks. Its image is the largest one of
-    the image's aspect that fits in the current view: tan(h/2) = tan(v_fov/2) · min(view aspect,
-    image aspect). Looking through it then shows the same framing, with the image filling the view
-    in at least one direction."""
-    th = math.tan(math.radians(v_fov) / 2) * min(view_aspect, image_aspect)
-    h = max(MIN_FOV, min(MAX_FOV, math.degrees(2 * math.atan(th))))
+def from_view(eye, target, v_fov: float, view_aspect: float, base: Projector | None = None) -> Projector:
+    """Match view: a projector where the orbit camera is, aimed where it looks, with the throw ratio
+    that gives the largest image of its raster's shape that fits in the view:
+    tan(h/2) = tan(v_fov/2) · min(view aspect, raster aspect). Looking through it then shows the
+    same framing, with the image filling the view in at least one direction."""
     base = base or Projector()
-    return base.with_(position=tuple(float(c) for c in eye), target=tuple(float(c) for c in target), h_fov=round(h, 2))
+    th = math.tan(math.radians(v_fov) / 2) * min(view_aspect, base.aspect)
+    throw = max(MIN_THROW, min(MAX_THROW, 1 / (2 * th)))
+    return base.placed(eye, target).with_(throw=round(throw, 3))
+
+
+def throw_from_fov(h_fov: float) -> float:
+    return 1 / (2 * math.tan(math.radians(h_fov) / 2))
+
+
+def raster_for(aspect: float) -> tuple[int, int]:
+    """A raster 1920 wide of this aspect (for a preview saved with an aspect only)."""
+    return 1920, max(MIN_RASTER, min(MAX_RASTER, round(1920 / aspect)))
 
 
 def mat_mul(a, b):

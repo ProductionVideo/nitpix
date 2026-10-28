@@ -2,7 +2,7 @@
 KEY), plain values only. No Qt, no GL, no importer objects: everything else (geometry, GPU
 buffers, the visibility texture) is rebuilt from the managed model files when the project reopens.
 
-Version 1:
+Version 2 (version 1, from before throw ratios and rasters, is read and migrated; see below):
   resources    {id: {path, name, sha256, size, origin, sidecars, missing}}  model files kept in the
                project (nitpix/models.py); `path` is relative to the project, `origin` where it came from
   sources      [{id, resource, origin}]  the stage's files in order; id is the stage's own ("m3"), so the
@@ -12,9 +12,15 @@ Version 1:
   assignments  {stage key: UV set}
   clip         the mapped clip's asset id in this project, or None
   tab          "surfaces" or "projectors"
-  camera       {yaw, pitch, dist, target: [x, y, z]}
-  projectors   [{id, position, target, h_fov, aspect, enabled, show_frustum}]  at most one for now; a
-               list (with ids) so several can follow without a new version
+  camera       {yaw, pitch, dist, target: [x, y, z], view}  view: "perspective", "front", "side" or "top"
+  projectors   [{id, position, target, roll, throw_ratio, raster: [w, h], raster_note, fit, enabled,
+               show_frustum}]  at most one for now; a list (with ids) so several can follow
+
+Version 1 stored a projector's horizontal field of view and an aspect (None: follow the clip). It
+is migrated so the saved picture looks the same: throw ratio from the angle; the raster 1920 wide
+of that aspect (the saved clip's own, for None), marked "inferred" (it was never chosen as real
+hardware); an explicit aspect keeps the clip stretched across the image, as version 1 drew it. The
+next save writes version 2; a version 1 nitpix then sets the document aside rather than misread it.
 
 `validate()` refuses anything else with a reason; the caller then keeps the stored text untouched.
 """
@@ -22,11 +28,13 @@ from __future__ import annotations
 
 import math
 
-from .projector import MAX_FOV, MIN_FOV, Projector
+from .projector import FITS, MAX_RASTER, MAX_THROW, MIN_RASTER, MIN_THROW, Projector, raster_for, throw_from_fov
 
-VERSION = 1
+VERSION = 2
+READS = (1, 2)
 KEY = "mapping.setup"
 TABS = ("surfaces", "projectors")
+VIEWS = ("perspective", "front", "side", "top")
 
 
 class SetupError(Exception):
@@ -34,23 +42,27 @@ class SetupError(Exception):
 
 
 def projector_to(p: Projector, pid: str = "p1") -> dict:
-    return {"id": pid, "position": list(p.position), "target": list(p.target), "h_fov": p.h_fov, "aspect": p.aspect,
-            "enabled": p.enabled, "show_frustum": p.show_frustum}
+    return {"id": pid, "position": list(p.position), "target": list(p.target), "roll": p.roll, "throw_ratio": p.throw,
+            "raster": list(p.raster), "raster_note": p.raster_note, "fit": p.fit, "enabled": p.enabled,
+            "show_frustum": p.show_frustum}
 
 
 def projector_from(d: dict) -> Projector:
-    return Projector(position=tuple(d["position"]), target=tuple(d["target"]), h_fov=d["h_fov"], aspect=d["aspect"],
-                     enabled=d["enabled"], show_frustum=d["show_frustum"])
+    return Projector(position=tuple(d["position"]), target=tuple(d["target"]), roll=d["roll"], throw=d["throw_ratio"],
+                     raster=tuple(d["raster"]), raster_note=d["raster_note"], fit=d["fit"], enabled=d["enabled"],
+                     show_frustum=d["show_frustum"])
 
 
-def validate(raw) -> dict:
-    """A checked copy of a stored document, or SetupError saying what is wrong with it."""
+def validate(raw, clip_aspect: float | None = None) -> dict:
+    """A checked copy of a stored document (as version 2), or SetupError saying what is wrong with
+    it. `clip_aspect`: the saved clip's display width / height, for migrating a version 1 projector
+    that followed the clip."""
     if not isinstance(raw, dict):
         raise SetupError("not a setup document")
     v = raw.get("version")
-    if v != VERSION:
-        raise SetupError(f"saved by a different version of nitpix (format {v!r}; this one reads {VERSION})")
-    out = {"version": VERSION}
+    if v not in READS:
+        raise SetupError(f"saved by a different version of nitpix (format {v!r}; this one reads {', '.join(map(str, READS))})")
+    out = {"version": VERSION, "migrated_from": v if v != VERSION else None}
     res = _type(raw.get("resources", {}), dict, "resources")
     out["resources"] = {}
     for rid, r in res.items():
@@ -88,24 +100,51 @@ def validate(raw) -> dict:
     if cam is not None:
         _type(cam, dict, "camera")
         cam = {"yaw": _num(cam.get("yaw"), "camera"), "pitch": _num(cam.get("pitch"), "camera"),
-               "dist": _num(cam.get("dist"), "camera"), "target": _vec(cam.get("target"), "camera target")}
+               "dist": _num(cam.get("dist"), "camera"), "target": _vec(cam.get("target"), "camera target"),
+               "view": cam.get("view", "perspective")}
         if cam["dist"] <= 0:
             raise SetupError("camera distance must be positive")
+        if cam["view"] not in VIEWS:
+            raise SetupError(f"unknown camera view {cam['view']!r}")
     out["camera"] = cam
     out["projectors"] = []
     for p in _type(raw.get("projectors", []), list, "projectors"):
         _type(p, dict, "projector")
-        aspect = p.get("aspect")
         rec = {"id": _type(p.get("id", "p1"), str, "projector id"), "position": _vec(p.get("position"), "projector position"),
-               "target": _vec(p.get("target"), "projector target"), "h_fov": _num(p.get("h_fov"), "field of view"),
-               "aspect": None if aspect is None else _num(aspect, "aspect"),
+               "target": _vec(p.get("target"), "projector target"),
                "enabled": _type(p.get("enabled", True), bool, "enabled"), "show_frustum": _type(p.get("show_frustum", True), bool, "frustum")}
-        if not MIN_FOV <= rec["h_fov"] <= MAX_FOV or (rec["aspect"] is not None and not 0.1 <= rec["aspect"] <= 10):
-            raise SetupError("projector field of view or aspect out of range")
+        if v == 1:
+            rec.update(_from_v1(p, clip_aspect))
+        else:
+            raster = p.get("raster")
+            if not isinstance(raster, list) or len(raster) != 2:
+                raise SetupError("projector raster is not two whole numbers")
+            rec.update({"roll": _num(p.get("roll", 0.0), "roll"), "throw_ratio": _num(p.get("throw_ratio"), "throw ratio"),
+                        "raster": [_int(n, "raster") for n in raster], "raster_note": _type(p.get("raster_note", ""), str, "raster note"),
+                        "fit": p.get("fit", "fit")})
+        if not MIN_THROW <= rec["throw_ratio"] <= MAX_THROW or not all(MIN_RASTER <= n <= MAX_RASTER for n in rec["raster"]):
+            raise SetupError("projector throw ratio or raster out of range")
+        if rec["fit"] not in FITS or not -360 <= rec["roll"] <= 360:
+            raise SetupError("projector content fit or roll not understood")
         out["projectors"].append(rec)
     if len(out["projectors"]) > 1:
         raise SetupError("more than one projector (this version shows one)")
     return out
+
+
+def _from_v1(p, clip_aspect):
+    """A version 1 projector's lens and image, as version 2 fields drawing the same picture."""
+    fov = _num(p.get("h_fov"), "field of view")
+    if not 1.0 <= fov <= 150.0:
+        raise SetupError("projector field of view out of range")
+    aspect = p.get("aspect")
+    if aspect is not None:
+        aspect = _num(aspect, "aspect")
+        if not 0.1 <= aspect <= 10:
+            raise SetupError("projector aspect out of range")
+    shape = aspect if aspect is not None else (clip_aspect if clip_aspect and clip_aspect > 0 else 16 / 9)
+    return {"roll": 0.0, "throw_ratio": throw_from_fov(fov), "raster": list(raster_for(shape)), "raster_note": "inferred",
+            "fit": "stretch" if aspect is not None else "fit"}
 
 
 def _type(v, t, what):
