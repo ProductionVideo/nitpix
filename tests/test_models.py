@@ -63,6 +63,25 @@ class Managed(unittest.TestCase):
         self.assertEqual(again["origin"], twin)                              # ...but keeps its own origin
         self.assertEqual(len(os.listdir(os.path.join(self.proj, "models"))), 2)
 
+    def test_same_bytes_under_another_name_never_disturbs_a_kept_copy(self):
+        a = os.path.join(self.tmp, "twins", "a.obj")
+        os.makedirs(os.path.dirname(a))
+        shutil.copyfile(os.path.join(self.src, "parts/a/screen.obj"), a)
+        ra = models.manage(a, self.proj)
+        kept_a = models.resolve(self.proj, ra)
+        b = os.path.join(self.tmp, "twins", "b.obj")
+        shutil.copyfile(a, b)
+        rb = models.manage(b, self.proj)
+        self.assertNotEqual(ra["id"], rb["id"])
+        self.assertTrue(os.path.isfile(kept_a))                              # the first copy is still where it was saved
+        self.assertIsNone(models.check(self.proj, ra))
+        self.assertIsNone(models.check(self.proj, rb))
+        with open(models.resolve(self.proj, rb), "ab") as fh:                 # a damaged copy of this same file is replaced...
+            fh.write(b"x")
+        self.assertTrue(models.manage(b, self.proj)["created"])
+        self.assertIsNone(models.check(self.proj, rb))
+        self.assertIsNone(models.check(self.proj, ra))                       # ...and nothing else is touched
+
     def test_missing_and_outside_sidecars_are_reported(self):
         obj = os.path.join(self.tmp, "odd", "odd.obj")
         os.makedirs(os.path.dirname(obj))

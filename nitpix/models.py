@@ -5,8 +5,9 @@ folder it was built from. No Qt; runs in the import helper process (nitpix/scene
   libraries its `mtllib` lines name. Textures are not copied: Mapping never draws them. An FBX is
   copied alone (embedded data travels with it; external textures are not used).
 - It is stored in `models/<id>/`, where id is the first 20 hex digits of a SHA-256 over the model's
-  and its sidecars' bytes and relative names. The same bytes share one folder; a different file
-  with the same name gets another. Sidecars keep their path relative to the model, so `mtllib`
+  name and bytes and its sidecars' relative names and bytes. The same file (name and bytes) shares
+  one folder; a different file with the same name, or the same bytes under another name, gets
+  another, so adding one never moves or replaces a copy something else refers to. Sidecars keep their path relative to the model, so `mtllib`
   lines resolve unchanged. Sidecars outside the model's own folder, or missing, are not copied and
   are listed, never silently promised.
 - The original is only read. The copy is written to a temporary folder inside `models/` and
@@ -76,14 +77,14 @@ def manage(src: str, project_folder: str) -> dict:
     sidecars, missing = obj_sidecars(src) if name.lower().endswith(".obj") else ([], [])
     here = os.path.dirname(src)
     main_hash = sha256(src)
-    h = hashlib.sha256(main_hash.encode())
+    h = hashlib.sha256(main_hash.encode() + b"\0" + name.encode())
     for rel in sidecars:
         h.update(b"\0" + rel.replace(os.sep, "/").encode() + b"\0" + sha256(os.path.join(here, rel)).encode())
     rid = h.hexdigest()[:ID_LEN]
     final = os.path.join(root, rid)
     if not _inside(final, root):
         raise ModelError("Refusing to write outside the project's models folder.")
-    created = not os.path.isfile(os.path.join(final, name))
+    created = not _intact(final, name, main_hash, sidecars)
     if created:
         tmp = tempfile.mkdtemp(prefix=".incoming-", dir=root)
         try:
@@ -93,7 +94,7 @@ def manage(src: str, project_folder: str) -> dict:
                     raise ModelError(f"Refusing to copy {rel} outside the models folder.")
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copyfile(os.path.join(here, rel), dst)
-            if os.path.isdir(final):                     # a damaged earlier copy: replace it
+            if os.path.isdir(final):                     # a damaged earlier copy of this same file: replace it
                 shutil.rmtree(final)
             os.replace(tmp, final)
         except BaseException:
@@ -130,6 +131,12 @@ def clean_incoming(project_folder: str):
         for n in os.listdir(root):
             if n.startswith(".incoming-"):
                 shutil.rmtree(os.path.join(root, n), True)
+
+
+def _intact(folder: str, name: str, main_hash: str, sidecars: list) -> bool:
+    """An earlier copy of this file (same name and bytes) with its sidecars all there."""
+    p = os.path.join(folder, name)
+    return os.path.isfile(p) and all(os.path.isfile(os.path.join(folder, s)) for s in sidecars) and sha256(p) == main_hash
 
 
 def _inside(path: str, root: str) -> bool:

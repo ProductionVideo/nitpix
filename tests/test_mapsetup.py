@@ -170,6 +170,33 @@ class Retained(unittest.TestCase):
         self.wait(ms2)
         self.assertEqual(ms2.stage.sources[-1].id, "m7")
 
+    def test_identical_files_under_two_names_both_come_back(self):
+        folder = os.path.join(self.tmp, "twins.nitpix")
+        ms, session = self.open(folder)
+        for n in ("a.obj", "b.obj"):
+            shutil.copyfile(self.P("parts/a/screen.obj"), os.path.join(self.src, n))
+        self.before = digest(self.src)
+        ms.add_models([self.P("a.obj")])
+        self.wait(ms)
+        ms.add_models([self.P("b.obj")])                                     # same bytes, another name
+        self.wait(ms)
+        twin = os.path.join(self.tmp, "elsewhere", "a.obj")                 # same name and bytes, another folder
+        os.makedirs(os.path.dirname(twin))
+        shutil.copyfile(self.P("a.obj"), twin)
+        ms.add_models([twin])
+        self.wait(ms)
+        self.assertEqual([s.origin for s in ms.stage.sources], [self.P("a.obj"), self.P("b.obj"), twin], self.said)
+        ms.select([o.key for o in ms.stage.sources[0].objects])
+        ms.apply_selected()
+        ms.flush()
+        uv = dict(ms.assign.uv)
+        self.close(ms, session)
+        ms2, _s2 = self.open(folder, new=False)
+        self.assertEqual(ms2.missing, {})
+        self.assertEqual([s.origin for s in ms2.stage.sources], [self.P("a.obj"), self.P("b.obj"), twin])
+        self.assertEqual([s.name for s in ms2.stage.sources], ["a.obj", "b.obj", "a.obj"])
+        self.assertEqual(ms2.assign.uv, uv)
+
     def test_an_old_project_opens_and_nothing_is_written_until_a_change(self):
         folder = os.path.join(self.tmp, "old.nitpix")
         ms, session = self.open(folder)

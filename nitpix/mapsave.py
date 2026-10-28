@@ -5,8 +5,9 @@ buffers, the visibility texture) is rebuilt from the managed model files when th
 Version 1:
   resources    {id: {path, name, sha256, size, origin, sidecars, missing}}  model files kept in the
                project (nitpix/models.py); `path` is relative to the project, `origin` where it came from
-  sources      [{id, resource}]  the stage's files in order; id is the stage's own ("m3"), so the
-               saved assignments ("m3:Stage/Screen") point at the same objects after restore
+  sources      [{id, resource, origin}]  the stage's files in order; id is the stage's own ("m3"), so the
+               saved assignments ("m3:Stage/Screen") point at the same objects after restore; origin
+               (optional) is where this placement's file came from, as several can share one kept copy
   next_id      the next source number, so a removed file's id is never reused
   assignments  {stage key: UV set}
   clip         the mapped clip's asset id in this project, or None
@@ -71,7 +72,7 @@ def validate(raw) -> dict:
         if rid not in out["resources"]:
             raise SetupError(f"source {sid} names a resource that is not listed")
         seen.add(sid)
-        out["sources"].append({"id": sid, "resource": rid})
+        out["sources"].append({"id": sid, "resource": rid, "origin": _type(s.get("origin", ""), str, "source origin")})
     out["next_id"] = max([_int(raw.get("next_id", 1), "next_id")] + [int(s["id"][1:]) + 1 for s in out["sources"]])
     out["assignments"] = {}
     for k, uv in _type(raw.get("assignments", {}), dict, "assignments").items():

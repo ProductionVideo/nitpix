@@ -447,12 +447,13 @@ class MappingScreen(QWidget):
         items = []
         for s in doc["sources"]:
             res = self.resources[s["resource"]]
+            origin = s.get("origin") or res["origin"]        # this placement's own file (several can share one copy)
             path = models.resolve(str(p.folder), res)
             if path is None or not os.path.isfile(path):
                 self._mark_missing(s["id"], s["resource"], "the copy kept in this project is missing" if path
-                                   else "its saved location is not inside this project")
+                                   else "its saved location is not inside this project", origin)
             else:
-                items.append({"path": path, "sid": s["id"], "rid": s["resource"]})
+                items.append({"path": path, "sid": s["id"], "rid": s["resource"], "origin": origin})
         self._projector_changed()
         self._start("restore", items)
         return doc["clip"]
@@ -496,8 +497,8 @@ class MappingScreen(QWidget):
 
     def _document(self) -> dict:
         """The setup as saved (nitpix/mapsave.py): only sources with a copy in the project, missing ones included."""
-        srcs = [{"id": s.id, "resource": self.src_res[s.id]} for s in self.stage.sources if s.id in self.src_res]
-        srcs += [{"id": sid, "resource": m["resource"]} for sid, m in self.missing.items()]
+        srcs = [{"id": s.id, "resource": self.src_res[s.id], "origin": s.origin} for s in self.stage.sources if s.id in self.src_res]
+        srcs += [{"id": sid, "resource": m["resource"], "origin": m["origin"]} for sid, m in self.missing.items()]
         kept = {s["id"] for s in srcs}
         assign = {k: v for k, v in (self.assign.uv if self.assign else {}).items() if k.partition(":")[0] in kept}
         for m in self.missing.values():
@@ -648,7 +649,7 @@ class MappingScreen(QWidget):
             m = self.missing.get(sid)
             path = models.resolve(str(p.folder), self.resources.get(m["resource"], {})) if (m and p) else None
             if path and os.path.isfile(path):
-                items.append({"path": path, "sid": sid, "rid": m["resource"]})
+                items.append({"path": path, "sid": sid, "rid": m["resource"], "origin": m["origin"]})
         if items:
             self._start("restore", items)
 
@@ -662,7 +663,7 @@ class MappingScreen(QWidget):
             there = self._already(p) if mode == "add" else None
             if there is not None:
                 skipped.append((name, f"already on the stage as {self.stage.label(there)}"))
-            elif real in seen:
+            elif real in seen and mode in ("add", "replace"):     # a restore may place one kept copy twice
                 skipped.append((name, "chosen twice"))
             else:
                 seen.add(real)
@@ -705,7 +706,7 @@ class MappingScreen(QWidget):
         for it in [b.current, *b.queue]:
             b.skipped.append((self._item_name(it), "not read"))
             if b.mode == "restore":
-                self._mark_missing(it["sid"], it["rid"], "not restored: the restore was cancelled")
+                self._mark_missing(it["sid"], it["rid"], "not restored: the restore was cancelled", it["origin"])
         b.queue = []
         self._finish()
 
@@ -728,16 +729,17 @@ class MappingScreen(QWidget):
         if error:
             b.failed.append((name, error))
             if b.mode == "restore":
-                self._mark_missing(it["sid"], it["rid"], f"could not be read: {error}")
+                self._mark_missing(it["sid"], it["rid"], f"could not be read: {error}", it["origin"])
         elif b.mode == "add":
-            b.added.append(self._add_scene(scene, self._register(resource)))
+            b.added.append(self._add_scene(scene, self._register(resource, scene)))
         elif b.mode == "replace":
-            b.read.append((scene, self._register(resource)))
+            b.read.append((scene, self._register(resource, scene)))
         elif b.mode == "restore":
             if scene.source.get("sha256") != self.resources[it["rid"]]["sha256"]:
                 b.failed.append((name, "the copy kept in this project has changed since it was saved"))
-                self._mark_missing(it["sid"], it["rid"], "the copy kept in this project has changed since it was saved")
+                self._mark_missing(it["sid"], it["rid"], "the copy kept in this project has changed since it was saved", it["origin"])
             else:
+                scene.source["origin"] = it["origin"]
                 self._forget_missing_row(it["sid"])
                 held = self.missing.pop(it["sid"], None)          # tried again after a cancelled restore
                 saved = held["assign"] if held else {k: v for k, v in self._pending_assign.items() if k.startswith(it["sid"] + ":")}
@@ -747,7 +749,7 @@ class MappingScreen(QWidget):
         else:                                         # relink
             sid = it["sid"]
             m = self.missing[sid]
-            rid = self._register(resource)
+            rid = self._register(resource, scene)
             same = resource["sha256"] == self.resources[m["resource"]]["sha256"]
             self._forget_missing_row(sid)
             self.missing.pop(sid)
@@ -848,7 +850,7 @@ class MappingScreen(QWidget):
         if self.assign is None:
             self.assign = Assignments(self.stage)
         if rid:
-            scene.source["origin"] = self.resources[rid]["origin"]      # shown and compared; the copy is what was read
+            scene.source.setdefault("origin", self.resources[rid]["origin"])   # shown and compared; the copy is what was read
         src = self.stage.add(scene, sid)
         if rid:
             self.src_res[src.id] = rid
@@ -869,7 +871,7 @@ class MappingScreen(QWidget):
         self.src_res, self.missing = {}, {}
         for sc, rid in zip(scenes, rids or [None] * len(scenes)):
             if rid:
-                sc.source["origin"] = self.resources[rid]["origin"]
+                sc.source.setdefault("origin", self.resources[rid]["origin"])
             src = self.stage.add(sc)
             if rid:
                 self.src_res[src.id] = rid
@@ -920,11 +922,15 @@ class MappingScreen(QWidget):
                 return src
         return None
 
-    def _register(self, resource):
+    def _register(self, resource, scene=None):
+        """The kept copy's record, by its id. A copy already listed keeps its record (several files on
+        the stage can share one copy); where this file came from goes with its source instead."""
         if not resource:
             return None
         rec = {k: resource[k] for k in ("path", "name", "sha256", "size", "origin", "sidecars", "missing")}
-        self.resources[resource["id"]] = rec
+        self.resources.setdefault(resource["id"], rec)
+        if scene is not None:
+            scene.source["origin"] = resource["origin"]
         return resource["id"]
 
     def _reapply(self, src, saved) -> int:
@@ -1026,16 +1032,16 @@ class MappingScreen(QWidget):
         for c in range(2):
             top.setForeground(c, theme.colour("warn"))
         top.setToolTip(0, f"Not on the stage: {m['why']}.\nKept in the project as {res.get('path', '?')}"
-                          f"\nOriginally {res.get('origin', '?')}\n{len(m['assign'])} saved assignment(s) held back."
+                          f"\nOriginally {m['origin'] or '?'}\n{len(m['assign'])} saved assignment(s) held back."
                           "\nRight-click to relink it to a file or take it off the stage.")
         self.tree.addTopLevelItem(top)
 
-    def _mark_missing(self, sid, rid, why):
+    def _mark_missing(self, sid, rid, why, origin):
         """A saved model that did not come back; its saved assignments are held, not dropped."""
         prior = self.missing.get(sid, {}).get("assign")
         assign = prior if prior is not None else {k: v for k, v in self._pending_assign.items() if k.startswith(sid + ":")}
         self._forget_missing_row(sid)
-        self.missing[sid] = {"resource": rid, "why": why, "assign": assign}
+        self.missing[sid] = {"resource": rid, "why": why, "assign": assign, "origin": origin or self.resources.get(rid, {}).get("origin", "")}
         self._add_missing_row(sid)
 
     def _forget_missing_row(self, sid):
