@@ -1631,7 +1631,7 @@ def _mapping_check(app, win, stage: str, shot: str):
         now = ([(x.id, m.stage.label(x)) for x in m.stage.sources], dict(m.assign.uv) if m.assign else {},
                m.projector, m.asset["id"] if m.asset else None, m.tabs.currentIndex())
         check("Reopen project: the setup is restored (files, assignments, projector, clip, tab)",
-              now == win._kept and not m.missing and m.view.loaded and m.save_lab.text() == "Saved in project",
+              now == win._kept and not m.missing and m.view.loaded and m.save_lab.text() == "Saved",
               f"{m.scene_lab.text()}; {len(now[1])} assignments")
         win.grab().save(f"{base}-6-restored.png")
     add(lambda: wait_import(s_restored), 1500)
@@ -1708,7 +1708,10 @@ def run(project: str | None = None) -> int:
         aid = os.environ.get("NITPIX_SCREENSHOT_ASSET")
         if aid and win.session.project:
             QTimer.singleShot(1500, lambda: win.show_asset(int(aid)))
-        if os.environ.get("NITPIX_SCREENSHOT_SETUP") and win.session.project:
+        if os.environ.get("NITPIX_SCREENSHOT_LAYOUT") and win.session.project:
+            from .setupcheck import run_layout
+            run_layout(app, win, shot)
+        elif os.environ.get("NITPIX_SCREENSHOT_SETUP") and win.session.project:
             from .setupcheck import run as setup_check
             setup_check(app, win, shot)
         elif os.environ.get("NITPIX_SCREENSHOT_RESTORE") and win.session.project:

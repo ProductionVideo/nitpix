@@ -168,7 +168,7 @@ class MappingScreen(QWidget):
         head.addWidget(QLabel("Clip"))
         self.media_box = QComboBox()
         self.media_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.media_box.setMinimumContentsLength(14)
+        self.media_box.setMinimumContentsLength(10)
         self.media_box.setToolTip("The clip every assigned object shows. Changing it changes the shared source for all of them.")
         self.media_box.activated.connect(lambda _i: self._choose_media(self.media_box.currentData()))
         head.addWidget(self.media_box, 2)
@@ -658,7 +658,7 @@ class MappingScreen(QWidget):
                 "projectors": [mapsave.projector_to(self.projector)] if self.projector else []}
 
     def _on_save_state(self, state, detail):
-        text = {"saved": "Saved in project", "pending": "Saving…", "error": "Not saved", "off": ""}[state]
+        text = {"saved": "Saved", "pending": "Saving…", "error": "Not saved", "off": ""}[state]   # short: the bar must fit the smallest window
         self.save_lab.setText(text)
         self.save_lab.setProperty("faint", state != "error")
         self.save_lab.setStyleSheet(f"color: {theme.T['fail']};" if state == "error" else "")

@@ -320,7 +320,7 @@ def run(app, win, shot: str):
         keep["saved"] = (m.projector, m.view.view_kind)
         keep["folder"] = str(win.session.project.folder)
         keep["paint"] = [t for _t0, t, _d, _c in m.view.stats]
-        check("Saved in the project before closing", m.save_lab.text() in ("Saved in project", "Saving…"), m.save_lab.text())
+        check("Saved in the project before closing", m.save_lab.text() in ("Saved", "Saving…"), m.save_lab.text())
         win.close_project()
     add(s_close, 800)
     add(lambda: (win.open_project(keep["folder"]), win.nav["mapping"].click()), 600)
@@ -354,6 +354,134 @@ def run(app, win, shot: str):
         except Exception as e:  # a broken step is a failed step, not a hung check
             import traceback
             results.append(("FAIL", f"step {i} ({fn.__name__})", f"{type(e).__name__}: {e} {traceback.format_exc(limit=3)!r}"))
+        if i + 1 < len(steps):
+            QTimer.singleShot(wait, lambda: go(i + 1))
+    QTimer.singleShot(1500, go)
+
+
+# ---- layout audit (NITPIX_SCREENSHOT_LAYOUT) ------------------------------------------------------
+def audit(win) -> list[str]:
+    """Problems a user would hit in the window as it is now: a control cut off by its container or
+    the window (outside a scroll area that can reach it), squeezed below the size it needs, or lying
+    over another control."""
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSpinBox, QComboBox, QLabel, QLineEdit,
+                                   QScrollArea, QTabBar, QWidget)
+    kinds = (QAbstractButton, QAbstractSpinBox, QComboBox, QLineEdit, QTabBar, QLabel)
+    out, seen = [], []
+    for w in win.findChildren(QWidget):
+        if not isinstance(w, kinds) or not w.isVisible() or w.window() is not win:
+            continue
+        if isinstance(w, QLineEdit) and isinstance(w.parentWidget(), (QAbstractSpinBox, QComboBox)):
+            continue                                  # the editor inside a spin box or combo
+        name = f"{type(w).__name__} '{getattr(w, 'text', lambda: '')() or w.toolTip()[:30] or w.objectName()}'"
+        r = QRect(w.mapTo(win, w.rect().topLeft()), w.size())
+        scroller, p = None, w.parentWidget()
+        visible = QRect(r)
+        while p is not None and p is not win:
+            pr = QRect(p.mapTo(win, p.rect().topLeft()), p.size())
+            if isinstance(p, QAbstractScrollArea) and not isinstance(p.parentWidget(), QAbstractScrollArea):
+                if isinstance(p, QScrollArea) and p.widget() is not None and p.widget().isAncestorOf(w):
+                    scroller = p
+                    break
+            visible = visible.intersected(pr)
+            p = p.parentWidget()
+        if scroller is not None:
+            vp = scroller.viewport()
+            inner = QRect(w.mapTo(scroller.widget(), w.rect().topLeft()), w.size())
+            if inner.right() > scroller.widget().width() and not scroller.horizontalScrollBar().isVisible():
+                out.append(f"{name}: wider than its scrolling panel, cut off at the side")
+            continue
+        if isinstance(w, QLabel):                       # text: only that it is not cut off by the window
+            if not win.rect().contains(r) and w.text():
+                out.append(f"QLabel '{w.text()[:30]}': cut off by the window")
+            continue
+        if visible.width() < r.width() - 1 or visible.height() < r.height() - 1:
+            out.append(f"{name}: cut off ({visible.width()}×{visible.height()} of {r.width()}×{r.height()} shown)")
+        if not win.rect().contains(r):
+            out.append(f"{name}: outside the window")
+        need = w.minimumSizeHint()
+        fixed = w.minimumWidth() == w.maximumWidth()          # an icon button sized on purpose
+        if isinstance(w, (QAbstractButton, QComboBox)) and not fixed and need.width() > 0 and w.width() < need.width() - 2:
+            out.append(f"{name}: squeezed ({w.width()} px wide, needs {need.width()})")
+        for other, orect in seen:
+            if other.isAncestorOf(w) or w.isAncestorOf(other):
+                continue
+            hit = r.intersected(orect)
+            if hit.width() > 2 and hit.height() > 2:
+                out.append(f"{name} overlaps {type(other).__name__} '{getattr(other, 'text', lambda: '')()}'")
+        seen.append((w, r))
+    return out
+
+
+def run_layout(app, win, shot: str):
+    """Each state at a few window sizes: an audit (above) and a screenshot."""
+    base = os.path.splitext(shot)[0]
+    lines, steps = [], []
+
+    def ms():
+        return win.mapping
+
+    def add(fn, wait=600):
+        steps.append((fn, wait))
+
+    def look(label):
+        probs = audit(win)
+        win.grab().save(f"{base}-{label}.png")
+        lines.append(("PASS" if not probs else "FAIL", label, "; ".join(probs[:6]) + (f" (+{len(probs) - 6})" if len(probs) > 6 else "")))
+
+    def size(w, h):
+        win.showNormal()
+        win.resize(w, h)
+
+    def wait_restore(then, limit=300):
+        m = ms()
+        if (m is None or m._batch is not None or not m.view.loaded) and limit > 0:
+            return QTimer.singleShot(100, lambda: wait_restore(then, limit - 1))
+        then()
+
+    add(lambda: (size(1400, 860), win.nav["mapping"].click()), 600)
+    add(lambda: wait_restore(lambda: None), 1500)
+    for w, h, tag in ((1400, 860, "normal"), (1040, 640, "minimum"), (1900, 1150, "large")):
+        add(lambda w=w, h=h: (size(w, h), ms().tabs.setCurrentIndex(1), ms().proj_scroll.verticalScrollBar().setValue(0)), 500)
+        add(lambda tag=tag: look(f"{tag}-projectors-top"), 10)
+        add(lambda: ms().proj_scroll.verticalScrollBar().setValue(ms().proj_scroll.verticalScrollBar().maximum()), 300)
+        add(lambda tag=tag: (look(f"{tag}-projectors-bottom"),
+                             lines.append(("PASS" if ms().proj_panel.remove_btn.visibleRegion().boundingRect().height()
+                                           >= ms().proj_panel.remove_btn.height() - 1 else "FAIL",
+                                           f"{tag}: last action reachable by scrolling", ""))), 10)
+        add(lambda: (ms().tabs.setCurrentIndex(0), ms().select([ms().stage.objects[0].key])), 400)
+        add(lambda tag=tag: look(f"{tag}-surfaces"), 10)
+        add(lambda: (ms().tabs.setCurrentIndex(1), ms().start_pick()), 400)
+        add(lambda tag=tag: (look(f"{tag}-picking"), ms().exit_modes()), 10)
+        add(lambda: ms().look_through(True), 400)
+        add(lambda tag=tag: (look(f"{tag}-look-through"), ms().exit_modes()), 10)
+    add(lambda: (size(1040, 640), ms().saver._set("error", "disk full")), 500)          # a failed save: Retry must be reachable
+    add(lambda: (look("minimum-save-failed"), lines.append(("PASS" if ms().retry_btn.isVisible() and win.rect().contains(
+        ms().retry_btn.geometry().translated(ms().retry_btn.mapTo(win, ms().retry_btn.rect().topLeft()) - ms().retry_btn.pos()))
+        else "FAIL", "minimum: Retry save visible inside the window", "")), ms().saver._set("saved", "")), 10)
+    add(lambda: (size(1040, 640), ms().remove_projector()), 500)
+    add(lambda: (look("minimum-no-projector"), ms().undo()), 10)
+    add(lambda: (size(1040, 640), win.nav["settings"].click()), 500)
+    add(lambda: look("minimum-settings"), 10)
+    add(lambda: win.settings_screen.findChild(__import__("PySide6.QtWidgets", fromlist=["QScrollArea"]).QScrollArea)
+        .verticalScrollBar().setValue(10 ** 6), 300)
+    add(lambda: look("minimum-settings-bottom"), 10)
+    add(lambda: (size(1400, 860), win.nav["mapping"].click()), 800)
+    add(lambda: look("normal-after-resizing"), 10)
+
+    def end():
+        print("\n".join(f"layout: {r} | {n} | {d}" for r, n, d in lines), flush=True)
+        win.close()
+        app.quit()
+    add(end, 0)
+
+    def go(i=0):
+        fn, wait = steps[i]
+        try:
+            fn()
+        except Exception as e:
+            lines.append(("FAIL", f"step {i}", f"{type(e).__name__}: {e}"))
         if i + 1 < len(steps):
             QTimer.singleShot(wait, lambda: go(i + 1))
     QTimer.singleShot(1500, go)
