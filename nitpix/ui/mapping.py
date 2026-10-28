@@ -507,8 +507,13 @@ class MappingScreen(QWidget):
         return (self.saver.detail or "the save failed") if self.saver.state == "error" else None
 
     def discard_unsaved(self):
-        """The user chose to go on without the changes that could not be saved: nothing more is written."""
-        self.saver.unbind()
+        """The user chose to go on without the changes that could not be saved: nothing more is
+        written while the close goes ahead (reset_project then unbinds). keep_unsaved() undoes it."""
+        self.saver.hold()
+
+    def keep_unsaved(self):
+        """The close did not happen after all: saving (and its failure protection) carries on."""
+        self.saver.release()
 
     def reset_project(self):
         """Another project (or none): drop the stage, assignments, clip and any import in progress.
@@ -1491,6 +1496,8 @@ class MappingScreen(QWidget):
         if "position" in fields and "target" not in fields:    # a typed body position moves like a drag:
             delta = tuple(float(a) - b for a, b in zip(fields.pop("position"), p.position))   # aim kept only if asked
             p = p.moved(delta, keep_aim=self.tool.keep_aim)
+        elif "target" in fields:                               # a typed target: re-aimed like a pick
+            p = p.reaim(fields.pop("position", p.position), fields.pop("target"))
         self._commit(p.with_(**fields), text)
 
     def _commit(self, new, text):

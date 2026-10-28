@@ -10,6 +10,11 @@ can never write one project's setup into another. Nothing is written while a res
 (suspended), so an incomplete stage never replaces the saved one. A saved document that could not
 be read is set aside under its own key before the first new save, never overwritten. A failed write
 is reported (state "error", with the reason) and tried again with the next change or retry().
+
+held: the user chose to close without the changes that could not be saved. Nothing is written
+while held; if the close does not happen after all (refused, failed), release() makes the saver
+exactly as it was (still bound, the same pending or error state), so later edits are saved and a
+failing save is still caught.
 """
 from __future__ import annotations
 
@@ -31,6 +36,7 @@ class SetupSaver(QObject):
         self._build = build                    # () -> the document, from the screen's state
         self.project = None
         self.suspended = False
+        self.held = False
         self.unreadable = None                 # the stored text that could not be read, to set aside
         self.state, self.detail = "off", ""
         self.writes = 0
@@ -43,7 +49,7 @@ class SetupSaver(QObject):
 
     def unbind(self):
         self._timer.stop()
-        self.project, self.unreadable = None, None
+        self.project, self.unreadable, self.held = None, None, False
         self._set("off", "")
 
     def changed(self, camera=False):
@@ -57,6 +63,8 @@ class SetupSaver(QObject):
     def flush(self) -> bool:
         """Write now if there is anything to write. True when the setup is saved."""
         self._timer.stop()
+        if self.held:
+            return True                        # going without these changes: nothing written
         if self.project is None or self.suspended or self.state not in ("pending", "error"):
             return self.state == "saved"
         try:
@@ -72,6 +80,17 @@ class SetupSaver(QObject):
         self.writes += 1
         self._set("saved", "")
         return True
+
+    def hold(self):
+        self._timer.stop()
+        self.held = True
+
+    def release(self):
+        """The close was abandoned: saving resumes where it was."""
+        if self.held:
+            self.held = False
+            if self.state in ("pending", "error") and self.project is not None:
+                self._timer.start(QUICK_MS)
 
     def retry(self):
         if self.state == "error":

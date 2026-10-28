@@ -83,6 +83,31 @@ class Geometry(unittest.TestCase):
             r, u, f = q.basis()
             self.assertAlmostEqual(sum(a * b for a, b in zip(r, u)), 0)
 
+    def test_no_flip_at_any_threshold_near_vertical(self):
+        """The review's case: 2 mm either side of where the old 0.5° rule switched. Then a target swept
+        under the projector, through exactly vertical, and out past NEAR_VERTICAL: the image's top
+        never turns by more than the aim itself does."""
+        a = Projector(position=(0, 8, 0), target=(0, 0, 0.069)).basis()[1]
+        b = Projector(position=(0, 8, 0), target=(0, 0, 0.071)).basis()[1]
+        self.assertGreater(sum(x * y for x, y in zip(a, b)), 0.9999)
+        for start in (Projector(position=(0, 8, 0), target=(0, 0, 0.3)), Projector(position=(0, 8, 0), target=(0.3, 0, 0.0), roll=30)):
+            p, first = start, start.basis()[1]
+            for i in range(1, 301):                                         # 2 mm steps, through (0, 0, 0)
+                z = 0.3 - i * 0.002
+                q = p.aimed_at((start.target[0] * z / 0.3, 0, start.target[2] * z / 0.3) if start.target[0] else (0, 0, z))
+                turn = math.degrees(math.acos(max(-1, min(1, sum(x * y for x, y in zip(p.basis()[1], q.basis()[1]))))))
+                self.assertLess(turn, 1.0, (start.roll, z, p.roll, q.roll))
+                p = q
+            self.assertGreater(sum(x * y for x, y in zip(first, p.basis()[1])), 0.99)   # still the same way up
+            for i in range(1, 200):                                        # out of the near-vertical zone: no jump
+                q = p.aimed_at((p.target[0], 0, p.target[2] - 0.05))
+                turn = math.degrees(math.acos(max(-1, min(1, sum(x * y for x, y in zip(p.basis()[1], q.basis()[1]))))))
+                self.assertLess(turn, 2.0)
+                p = q
+        far = Projector(position=(0, 2, 10), target=(0, 2, 0), roll=12)  # away from vertical: roll kept exactly
+        self.assertEqual(far.aimed_at((3, 0.5, 0)).roll, 12)
+        self.assertEqual(Projector(position=(0, 8, 0), target=(0, 0, 0)).basis()[1], (0.0, 0.0, -1.0))   # exactly down
+
     def test_edits(self):
         p = Projector(position=(0, 2, 10), target=(0, 2, 0), roll=5, throw=2.0)
         aimed = p.aimed_at((1.5, 1.0, 0.5))
@@ -126,7 +151,7 @@ V1 = {"version": 1, "resources": {}, "sources": [], "next_id": 1, "assignments":
 class Saved(unittest.TestCase):
     def test_round_trip(self):
         p = Projector(position=(1, 2, 3), target=(0, 1, 0), roll=-12.5, throw=1.37, raster=(3840, 2160), fit="stretch")
-        doc = mapsave.validate({**copy.deepcopy(V1), "version": 2, "projectors": [mapsave.projector_to(p)],
+        doc = mapsave.validate({**copy.deepcopy(V1), "version": 3, "projectors": [mapsave.projector_to(p)],
                                 "camera": {**V1["camera"], "view": "top"}})
         self.assertEqual(mapsave.projector_from(doc["projectors"][0]), p)
         self.assertEqual(doc["camera"]["view"], "top")
@@ -147,8 +172,30 @@ class Saved(unittest.TestCase):
         unknown = mapsave.projector_from(mapsave.validate(copy.deepcopy(V1))["projectors"][0])
         self.assertEqual(unknown.raster, (1920, 1080))
 
+    def test_older_setups_aimed_near_vertical_keep_their_picture(self):
+        """Saved by a candidate before version 3 with the fixed top within 0.5° of vertical: migrated
+        to the roll that draws the same picture; far from vertical, nothing changes."""
+        for target, roll in (((0.0, 0.0, 0.05), 0.0), ((0.04, 0.0, -0.03), 25.0), ((3.0, 0.0, 2.0), 7.0)):
+            p = Projector(position=(0, 8, 0), target=target, roll=roll)
+            f = p.basis()[2]
+            if abs(f[1]) > math.cos(math.radians(0.5)):                    # the old basis, by its old rule
+                up = (0.0, 0.0, -1.0)
+                r0 = [f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0]]
+                n = math.sqrt(sum(c * c for c in r0))
+                r0 = [c / n for c in r0]
+                u0 = [r0[1] * f[2] - r0[2] * f[1], r0[2] * f[0] - r0[0] * f[2], r0[0] * f[1] - r0[1] * f[0]]
+                a = math.radians(roll)
+                want = [u0[i] * math.cos(a) + r0[i] * math.sin(a) for i in range(3)]
+            else:
+                want = list(p.basis()[1])
+            doc = {**copy.deepcopy(V1), "version": 2, "projectors": [mapsave.projector_to(p)]}
+            got = mapsave.projector_from(mapsave.validate(doc)["projectors"][0])
+            self.assertGreater(sum(x * y for x, y in zip(got.basis()[1], want)), 0.99999, (target, got.roll))
+            again = mapsave.validate({**doc, "version": 3, "projectors": [mapsave.projector_to(got)]})   # not migrated twice
+            self.assertEqual(mapsave.projector_from(again["projectors"][0]), got)
+
     def test_what_is_refused(self):
-        good = {**copy.deepcopy(V1), "version": 2, "projectors": [mapsave.projector_to(Projector())]}
+        good = {**copy.deepcopy(V1), "version": 3, "projectors": [mapsave.projector_to(Projector())]}
         for name, change in (("throw", {"throw_ratio": 0}), ("raster", {"raster": [1920]}), ("fit", {"fit": "zoom"}),
                              ("raster size", {"raster": [1920, 99999]})):
             with self.subTest(name):
@@ -157,7 +204,7 @@ class Saved(unittest.TestCase):
                 with self.assertRaises(mapsave.SetupError):
                     mapsave.validate(bad)
         with self.assertRaises(mapsave.SetupError):
-            mapsave.validate({**good, "version": 3})                       # a newer nitpix's: set aside, not misread
+            mapsave.validate({**good, "version": 4})                       # a newer nitpix's: set aside, not misread
         with self.assertRaises(mapsave.SetupError):
             mapsave.validate({**good, "camera": {**V1["camera"], "view": "iso"}})
 

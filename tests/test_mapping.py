@@ -21,7 +21,7 @@ FIX = os.path.join(HERE, "fixtures", "scenes")
 HAS = importlib.util.find_spec("PySide6") is not None and importlib.util.find_spec("assimp_py") is not None
 if HAS:
     from PySide6.QtCore import QSettings
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
     from nitpix import service, variant
     from nitpix.mapping import MIXED, Assignments
@@ -802,6 +802,31 @@ class ProjectorsTab(_Screen):
         QTest.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, away)
         self.assertIsNone(ms.projector)
 
+    def test_a_floor_aim_typed_across_the_vertical_does_not_flip(self):
+        import math
+        ms = self.ms
+        self.import_(os.path.join(FIX, "projector", "projection.obj"))
+        ms.tabs.setCurrentIndex(1)
+        ms.add_projector()
+        ms.edit_projector({"position": (0.0, 8.0, 0.0), "target": (0.0, 8.0, -5.0)}, "Place")   # level, facing upstage
+        ms.edit_projector({"target": (0.0, 0.0, 0.3)}, "Aim at the floor")
+        top = lambda: ms.projector.basis()[1]
+        first, prev = top(), top()
+        self.assertAlmostEqual(abs(ms.projector.roll), 180.0, 0)             # the level reference points downstage here
+        self.assertEqual(abs(ms.proj_panel.roll.value()), round(abs(ms.projector.roll), 1))   # shown, editable
+        for z in (0.2, 0.08, 0.07, 0.01, 0.0, -0.01, -0.07, -0.2, -0.3):     # the Target Z field (cm), across the vertical
+            ms.proj_panel.tgt[2].setValue(z)
+            self.assertEqual(ms.projector.target[2], z)
+            self.assertGreater(sum(a * b for a, b in zip(prev, top())), math.cos(math.radians(5)), z)
+            prev = top()
+        self.assertLess(first[2], -0.99)                                     # tilted down from facing upstage: top upstage
+        self.assertGreater(sum(a * b for a, b in zip(first, top())), 0.99)   # the floor image still reads the same way
+        self.assertAlmostEqual(ms.projector.roll, 0.0, 0)                    # past the vertical the reference agrees again
+        before = ms.projector
+        ms.undo()
+        ms.redo()
+        self.assertEqual(ms.projector, before)
+
     def test_views_and_framing(self):
         ms = self.ms
         self.import_(os.path.join(FIX, "projector", "projection.obj"))
@@ -1188,6 +1213,58 @@ class OneSession(unittest.TestCase):
         q = Project(folder)
         self.assertEqual(q.get_meta("mapping.setup"), good)                  # the last good save is what the project keeps
         q.close()
+
+    def test_a_discard_only_counts_if_the_close_happens(self):
+        """Discard, then the transition does not happen (the switch fails, or a running scan keeps the
+        app open): the project keeps saving, and a later failure is caught again."""
+        from nitpix.scanner import JobManager
+        w = self.window()
+        w.show_view("mapping")
+        ms, p = w.mapping, w.session.project
+        ms._replace_with([load_scene(os.path.join(FIX, "stage.obj"))])
+        ms.flush()
+        asked = []
+        w.ask_unsaved_mapping = lambda action, why: (asked.append(action), "discard")[1]
+        broken = mock.patch.object(p, "set_meta", side_effect=OSError("disk full"))
+        broken.start()
+        ms.view.orbit(40, 0)
+        with mock.patch.object(w.session, "open", side_effect=OSError("cannot read that folder")):
+            self.assertFalse(w.open_project(tempfile.mkdtemp(dir=self.tmp) + "/x.nitpix"))     # discarded, then failed
+        self.assertEqual(asked, ["Opening another project"])
+        self.assertIs(w.session.project, p)
+        self.assertIs(ms.saver.project, p)
+        self.assertFalse(ms.saver.held)
+        self.assertEqual(ms.saver.state, "error")                            # still unsaved, still said
+        self.assertIn("disk full", ms.settle())                              # and still protected
+        broken.stop()
+        ms.view.orbit(5, 0)                                                  # later edits are saved again
+        self.assertTrue(ms.flush())
+        self.assertEqual(round(p.get_meta("mapping.setup")["camera"]["yaw"], 3), round(ms.view.yaw, 3))
+
+        scanning = mock.patch.object(JobManager, "active", new_callable=mock.PropertyMock, return_value=object())
+        scanning.start()
+        self.addCleanup(mock.patch.stopall)                                  # whatever happens below
+        asked.clear()
+        self.assertFalse(w.open_project(tempfile.mkdtemp(dir=self.tmp) + "/y.nitpix"))   # refused first...
+        self.assertFalse(w.close_project())
+        self.assertEqual(asked, [])                                           # ...before Mapping is asked or reset
+        self.assertTrue(ms.scene)
+        broken = mock.patch.object(p, "set_meta", side_effect=OSError("disk full"))
+        broken.start()
+        ms.view.orbit(5, 0)
+        w.ask_quit_scan = lambda: QMessageBox.StandardButton.No
+        self.assertFalse(w.close())                                          # the scan question says no
+        self.assertEqual(asked, [])
+        w.ask_quit_scan = lambda: QMessageBox.StandardButton.Yes
+        w.ask_unsaved_mapping = lambda action, why: (asked.append(action), "cancel")[1]
+        self.assertFalse(w.close())                                          # Mapping says keep it open
+        self.assertEqual(asked, ["Quitting"])
+        self.assertIs(ms.saver.project, p)
+        self.assertEqual(ms.saver.state, "error")
+        scanning.stop()
+        broken.stop()
+        ms.view.orbit(5, 0)
+        self.assertTrue(ms.flush())
 
     def test_nothing_to_lose_asks_nothing(self):
         w = self.window()

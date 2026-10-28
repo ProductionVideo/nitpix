@@ -2,7 +2,7 @@
 KEY), plain values only. No Qt, no GL, no importer objects: everything else (geometry, GPU
 buffers, the visibility texture) is rebuilt from the managed model files when the project reopens.
 
-Version 2 (version 1, from before throw ratios and rasters, is read and migrated; see below):
+Version 3 (versions 1 and 2, from candidate builds before it, are read and migrated; see below):
   resources    {id: {path, name, sha256, size, origin, sidecars, missing}}  model files kept in the
                project (nitpix/models.py); `path` is relative to the project, `origin` where it came from
   sources      [{id, resource, origin}]  the stage's files in order; id is the stage's own ("m3"), so the
@@ -20,7 +20,12 @@ Version 1 stored a projector's horizontal field of view and an aspect (None: fol
 is migrated so the saved picture looks the same: throw ratio from the angle; the raster 1920 wide
 of that aspect (the saved clip's own, for None), marked "inferred" (it was never chosen as real
 hardware); an explicit aspect keeps the clip stretched across the image, as version 1 drew it. The
-next save writes version 2; a version 1 nitpix then sets the document aside rather than misread it.
+next save writes version 3; an older nitpix then sets the document aside rather than misread it.
+
+Version 3 changed only what roll means for an aim within 0.5° of straight up or down: before, the
+image's top was fixed there (-Z down, +Z up); now roll counts from the level reference, which is
+continuous up to the exact vertical (nitpix/projector.py). Versions 1 and 2 get the roll that
+draws the picture they had (legacy_roll); every other projector is unchanged.
 
 `validate()` refuses anything else with a reason; the caller then keeps the stored text untouched.
 """
@@ -28,10 +33,10 @@ from __future__ import annotations
 
 import math
 
-from .projector import FITS, MAX_RASTER, MAX_THROW, MIN_RASTER, MIN_THROW, Projector, raster_for, throw_from_fov
+from .projector import FITS, MAX_RASTER, MAX_THROW, MIN_RASTER, MIN_THROW, Projector, legacy_roll, raster_for, throw_from_fov
 
-VERSION = 2
-READS = (1, 2)
+VERSION = 3
+READS = (1, 2, 3)
 KEY = "mapping.setup"
 TABS = ("surfaces", "projectors")
 VIEWS = ("perspective", "front", "side", "top")
@@ -126,6 +131,8 @@ def validate(raw, clip_aspect: float | None = None) -> dict:
             raise SetupError("projector throw ratio or raster out of range")
         if rec["fit"] not in FITS or not -360 <= rec["roll"] <= 360:
             raise SetupError("projector content fit or roll not understood")
+        if v < 3:
+            rec["roll"] = legacy_roll(projector_from(rec))
         out["projectors"].append(rec)
     if len(out["projectors"]) > 1:
         raise SetupError("more than one projector (this version shows one)")

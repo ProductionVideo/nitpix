@@ -10,15 +10,19 @@ Coordinates are the stage's (nitpix/scene.py): metres, Y up; the audience side o
 stage is usually +Z.
 
 - Aim: the projector looks from `position` towards `target`. A target at the position itself
-  has no direction; `problem()` says so and nothing is projected. Aiming (picking a target)
-  keeps the position and the roll.
-- Orientation: with roll 0 the image's top edge stays towards +Y (world up), so the horizon is
-  level whatever the pan and tilt. Aimed within 0.5° of straight down or up, where "up" has no
-  meaning, the top points towards -Z (upstage) for down and +Z for up, so a floor projection reads
-  the right way up from the audience. Near vertical a small change of aim can turn the image
-  quickly; that is the geometry of pan and tilt, and `roll` sets it by hand.
-- `roll` turns the image about the aim, in degrees; positive turns its top towards the right as
-  seen from behind the projector.
+  has no direction; `problem()` says so and nothing is projected.
+- Orientation: `roll` turns the image about the aim, in degrees, from a level reference: with roll
+  0 the image's top edge is towards +Y (world up), so the horizon is level whatever the pan and
+  tilt. That reference is continuous for every aim except exactly straight down or up, where it
+  is defined as top towards -Z (upstage) aimed down, so a floor projection reads the right way up
+  from the audience, and +Z aimed up. Positive roll turns the top towards the right as seen from
+  behind the projector.
+- Re-aiming (reaim(): picking a target, moving with the aim kept, typing a target): away from
+  vertical the roll is kept as it is. When the old or the new aim is within NEAR_VERTICAL of
+  straight up or down, where the level reference turns quickly with the aim (by half a turn as an
+  aim passes beneath the projector), the roll is set instead so that the image keeps the
+  orientation it had, as near as the new aim allows. So a small aim edit never flips the image;
+  a roll gained that way stays until changed by hand.
 - `throw` is the width-based throw ratio: distance / image width, so at distance D the image is
   D / throw wide. It is the only stored lens value: the horizontal angle `h_fov` follows from it,
   tan(h/2) = 1 / (2 throw), so the two can never disagree.
@@ -33,7 +37,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 
-VERTICAL = math.cos(math.radians(0.5))      # |forward . Y| above this: aimed (almost) straight up or down
+NEAR_VERTICAL = 20.0                         # degrees from straight up or down: re-aiming keeps the image's orientation
+LEGACY_VERTICAL = math.cos(math.radians(0.5))   # setups saved before version 3 used a fixed top within 0.5° of vertical
 MIN_THROW, MAX_THROW = 0.13, 60.0            # about 150° to 1° wide
 MIN_RASTER, MAX_RASTER = 16, 16384
 FITS = ("fit", "stretch")
@@ -101,12 +106,7 @@ class Projector:
     def basis(self):
         """(right, up, forward) unit vectors; forward points from the projector to the target."""
         f = _norm(_sub(self.target, self.position))
-        if abs(f[1]) <= VERTICAL:
-            world_up = (0.0, 1.0, 0.0)
-        else:                               # straight down: top upstage (-Z); straight up: top towards +Z
-            world_up = (0.0, 0.0, -1.0) if f[1] < 0 else (0.0, 0.0, 1.0)
-        r = _norm(_cross(f, world_up))
-        u = _cross(r, f)
+        r, u = _level(f)
         if self.roll:
             a = math.radians(self.roll)
             c, s = math.cos(a), math.sin(a)
@@ -147,15 +147,26 @@ class Projector:
         return [_add(c, _add(_mul(r, sx * w / 2), _mul(u, sy * h / 2))) for sx, sy in ((-1, 1), (1, 1), (1, -1), (-1, -1))]
 
     # ---- edits (each returns a new Projector) -------------------------------------------
+    def reaim(self, position, target) -> "Projector":
+        """A new position and/or target, with the roll kept (away from vertical) or set so the image
+        keeps its orientation (near vertical): see the module notes."""
+        new = self.with_(position=tuple(float(c) for c in position), target=tuple(float(c) for c in target))
+        if new.problem() or self.problem() or (_off_vertical(self) > NEAR_VERTICAL and _off_vertical(new) > NEAR_VERTICAL):
+            return new
+        _r, up, f0 = self.basis()
+        f1 = new.basis()[2]
+        roll = _roll_for(_turned(up, f0, f1), f1)               # the image top turned with the aim, by the shortest turn
+        return new if roll is None else new.with_(roll=roll)
+
     def aimed_at(self, point) -> "Projector":
-        """Aimed at `point`: the position and roll stay."""
-        return self.with_(target=tuple(float(c) for c in point))
+        """Aimed at `point`: the position stays; the image keeps its orientation (reaim())."""
+        return self.reaim(self.position, point)
 
     def moved(self, delta, keep_aim: bool = False) -> "Projector":
         """The body moved by `delta`. It keeps its orientation (the target moves with it) unless
         `keep_aim`, when the target stays and the projector turns to it."""
         pos = _add(self.position, delta)
-        return self.with_(position=pos) if keep_aim else self.with_(position=pos, target=_add(self.target, delta))
+        return self.reaim(pos, self.target) if keep_aim else self.with_(position=pos, target=_add(self.target, delta))
 
     def placed(self, eye, look_at) -> "Projector":
         """Moved to `eye`, aimed at `look_at`: the pose only; throw, raster and roll stay."""
@@ -171,6 +182,59 @@ def from_view(eye, target, v_fov: float, view_aspect: float, base: Projector | N
     th = math.tan(math.radians(v_fov) / 2) * min(view_aspect, base.aspect)
     throw = max(MIN_THROW, min(MAX_THROW, 1 / (2 * th)))
     return base.placed(eye, target).with_(throw=round(throw, 3))
+
+
+def legacy_roll(p: Projector) -> float:
+    """The roll that gives a projector saved before version 3 the picture it had then: those
+    setups used a fixed top (-Z down, +Z up) within 0.5° of vertical rather than the level
+    reference. Elsewhere the roll is unchanged."""
+    f = _norm(_sub(p.target, p.position))
+    if abs(f[1]) <= LEGACY_VERTICAL or p.problem():
+        return p.roll
+    up = (0.0, 0.0, -1.0) if f[1] < 0 else (0.0, 0.0, 1.0)
+    r0 = _norm(_cross(f, up))
+    u0 = _cross(r0, f)
+    a = math.radians(p.roll)
+    old_u = _add(_mul(u0, math.cos(a)), _mul(r0, math.sin(a)))
+    roll = _roll_for(old_u, f)
+    return p.roll if roll is None else roll
+
+
+def _level(f):
+    """(right, up) of the level reference for aim f (roll 0): continuous except exactly vertical."""
+    if math.hypot(f[0], f[2]) < 1e-9:      # exactly straight down: top upstage (-Z); straight up: +Z
+        world_up = (0.0, 0.0, -1.0) if f[1] < 0 else (0.0, 0.0, 1.0)
+    else:
+        world_up = (0.0, 1.0, 0.0)
+    r = _norm(_cross(f, world_up))
+    return r, _cross(r, f)
+
+
+def _off_vertical(p: Projector) -> float:
+    """Degrees between the aim and straight up or down."""
+    f = _norm(_sub(p.target, p.position))
+    return math.degrees(math.acos(min(1.0, abs(f[1]))))
+
+
+def _turned(v, f0, f1):
+    """v rotated by the shortest rotation taking direction f0 to f1 (Rodrigues); v itself when f0 and
+    f1 are opposite, where the shortest rotation is not defined."""
+    k = _cross(f0, f1)
+    s, c = math.sqrt(_dot(k, k)), _dot(f0, f1)
+    if s < 1e-12:
+        return v
+    k = _mul(k, 1 / s)
+    return _add(_add(_mul(v, c), _mul(_cross(k, v), s)), _mul(k, _dot(k, v) * (1 - c)))
+
+
+def _roll_for(top, f) -> float | None:
+    """The roll (degrees, -180..180) whose image top for aim f is nearest the direction `top`; None
+    when `top` lies along f (no nearest)."""
+    t = _sub(top, _mul(f, _dot(top, f)))
+    if math.sqrt(_dot(t, t)) < 1e-6:
+        return None
+    r0, u0 = _level(f)
+    return round(math.degrees(math.atan2(_dot(t, r0), _dot(t, u0))), 9)
 
 
 def throw_from_fov(h_fov: float) -> float:

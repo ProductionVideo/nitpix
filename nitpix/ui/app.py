@@ -728,12 +728,17 @@ class MainWindow(QMainWindow):
     # ---- project lifecycle -------------------------------------------------------
     def open_project(self, path: str, name: str | None = None) -> bool:
         """False when it did not open: an error, or the user kept the current project open."""
-        if self.session.project is not None and not self.mapping_released("Opening another project"):
-            return False
+        if self.session.project is not None:
+            if self._scan_blocks("switching projects"):
+                return False
+            if not self.mapping_released("Opening another project"):
+                return False
         try:
             self.session.open(path, name, defaults=remembered_defaults())
         except Exception as e:
             self.toast(str(e), True)
+            if self.mapping is not None:
+                self.mapping.keep_unsaved()        # still the same project: a discard choice no longer applies
             return False
         for problem in self.session.seed_problems:
             self.toast(problem, True)
@@ -795,7 +800,7 @@ class MainWindow(QMainWindow):
             self.session.jobs.scan_roots([str(loc["delivery"])])
 
     def close_project(self) -> bool:
-        if not self.mapping_released("Closing the project"):
+        if self._scan_blocks("closing the project") or not self.mapping_released("Closing the project"):
             return False
         try:
             self._reset_mapping()
@@ -805,11 +810,21 @@ class MainWindow(QMainWindow):
             self.session.close()
         except Exception as e:
             self.toast(str(e), True)
+            if self.mapping is not None:
+                self.mapping.keep_unsaved()
             return False
         self.start.refresh()
         self.show_view("start")
         self.refresh_rail()
         return True
+
+    def _scan_blocks(self, what: str) -> bool:
+        """A running scan stops a project from closing: said, and checked before anything else."""
+        jobs = self.session.jobs
+        if jobs and jobs.active:
+            self.toast(f"Finish or cancel the running batch before {what}.", True)
+            return True
+        return False
 
     def mapping_released(self, action: str) -> bool:
         """Mapping's unsaved setup written into the project still open, before it closes. If that save
@@ -825,6 +840,9 @@ class MainWindow(QMainWindow):
             if choice != "retry":
                 return False
         return True
+
+    def ask_quit_scan(self):
+        return QMessageBox.question(self, "Quit", "A scan is running. Cancel it and quit?")
 
     def ask_unsaved_mapping(self, action: str, why: str) -> str:
         """"retry", "discard" or "cancel"."""
@@ -1273,12 +1291,12 @@ class MainWindow(QMainWindow):
             self.toast_lab.move((self.width() - self.toast_lab.width()) // 2, self.height() - self.toast_lab.height() - 24)
 
     def closeEvent(self, ev):
-        if self.session.project is not None and not self.mapping_released("Quitting"):
-            return ev.ignore()                 # before anything is stopped or released
         jobs = self.session.jobs
+        if jobs and jobs.active and self.ask_quit_scan() != QMessageBox.StandardButton.Yes:
+            return ev.ignore()                 # every question first: nothing is stopped or released yet
+        if self.session.project is not None and not self.mapping_released("Quitting"):
+            return ev.ignore()
         if jobs and jobs.active:
-            if QMessageBox.question(self, "Quit", "A scan is running. Cancel it and quit?") != QMessageBox.StandardButton.Yes:
-                return ev.ignore()
             jobs.cancel()
             time.sleep(0.3)
         self.poll.stop()
