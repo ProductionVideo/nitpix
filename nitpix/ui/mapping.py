@@ -52,7 +52,7 @@ from .mapsetup import SetupSaver
 from .projectors import ProjectorPanel
 from .review import PosCtx, btn
 from .timeline import Timeline
-from .widgets import ElideLabel, repolish
+from .widgets import ElideComboBox, ElideLabel, repolish
 
 KEY = Qt.ItemDataRole.UserRole
 PANE_MARGINS = (14, 12, 4, 4)                  # inside each tab: clear of the splitter, the tab bar and the window edge
@@ -166,7 +166,7 @@ class MappingScreen(QWidget):
         head = QHBoxLayout()
         head.setSpacing(8)
         head.addWidget(QLabel("Clip"))
-        self.media_box = QComboBox()
+        self.media_box = ElideComboBox()
         self.media_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.media_box.setMinimumContentsLength(10)
         self.media_box.setToolTip("The clip every assigned object shows. Changing it changes the shared source for all of them.")
@@ -187,8 +187,13 @@ class MappingScreen(QWidget):
         self.save_lab = QLabel()
         self.save_lab.setProperty("faint", True)
         self.save_lab.setToolTip(SAVE_NOTE)
+        self.save_lab.setFixedWidth(max(self.save_lab.fontMetrics().horizontalAdvance(t)
+                                       for t in ("Saved", "Saving…", "Not saved")) + 6)
         head.addWidget(self.save_lab)
-        self.retry_btn = btn("Retry save", "Try saving the Mapping setup into the project again", lambda: self.saver.retry())
+        self.retry_btn = btn("Retry", "Try saving the Mapping setup into the project again", lambda: self.saver.retry())
+        policy = self.retry_btn.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.retry_btn.setSizePolicy(policy)
         self.retry_btn.hide()
         head.addWidget(self.retry_btn)
         self.saver.state_changed.connect(self._on_save_state)
@@ -262,6 +267,8 @@ class MappingScreen(QWidget):
         self.playhead.moved.connect(self._on_moved)
         self.playhead.pending_changed.connect(lambda _p: self.ctx and self._update_tc())
         info = QHBoxLayout()
+        info.setContentsMargins(0, 4, 12, 4)
+        info.setSpacing(10)
         self.tex_lab = ElideLabel("")
         self.tex_lab.setFont(theme.mono(11))
         self.tex_lab.setProperty("muted", True)
@@ -272,7 +279,8 @@ class MappingScreen(QWidget):
         self.hint_lab = ElideLabel(CAMERA_HINT)               # until the camera is first moved this session
         self.hint_lab.setProperty("faint", True)
         info.addWidget(self.hint_lab, 2)
-        info.addWidget(btn("Reset view", "Front perspective view, whole stage", lambda: self.frame_all(reset=True)))
+        self.reset_view_btn = btn("Reset view", "Front perspective view, whole stage", lambda: self.frame_all(reset=True))
+        info.addWidget(self.reset_view_btn)
         ll.addLayout(info)
         tr = QHBoxLayout()
         tr.setSpacing(10)
@@ -447,6 +455,11 @@ class MappingScreen(QWidget):
         p.place_requested.connect(self.place_at_view)
         p.match_requested.connect(self.projector_from_view)
         p.remove_requested.connect(self.remove_projector)
+        self._number_drag_base = None
+        self._number_drag_text = "Edit projector"
+        p.scrub_started.connect(self._start_number_drag)
+        p.scrub_preview.connect(self._preview_number_drag)
+        p.scrub_finished.connect(self._finish_number_drag)
         p.changed.connect(self.edit_projector)
         p.look_requested.connect(self.look_through)
         p.undo_requested.connect(self.undo)
@@ -700,6 +713,7 @@ class MappingScreen(QWidget):
             self.status.emit(f"{a['name']} is not at its recorded path", True)
             return
         self.asset, self.ctx = a, PosCtx(a)
+        self.media_box.setToolTip(f"{a['name']}\n{a['path']}\nThe shared clip for all assigned objects.")
         f = min(a.get("last_frame") or 0, self.ctx.count - 1) if frame is None else max(0, min(self.ctx.count - 1, int(frame)))
         self.playhead.begin(self.ctx.count, f, new=True)
         self._pending_frame = f
@@ -1487,9 +1501,13 @@ class MappingScreen(QWidget):
 
     def edit_projector(self, fields, text="Edit projector"):
         """One committed edit of the projector's fields (a number, a choice, a checkbox)."""
-        p = self.editor.state
+        p = self._edited_projector(self.editor.state, fields)
+        if p is not None:
+            self._commit(p, text)
+
+    def _edited_projector(self, p, fields):
         if p is None:
-            return
+            return None
         fields = dict(fields)
         if "h_fov" in fields:                                  # an angle, from older callers: as a throw ratio
             fields["throw"] = 1 / (2 * math.tan(math.radians(fields.pop("h_fov")) / 2))
@@ -1498,7 +1516,26 @@ class MappingScreen(QWidget):
             p = p.moved(delta, keep_aim=self.tool.keep_aim)
         elif "target" in fields:                               # a typed target: re-aimed like a pick
             p = p.reaim(fields.pop("position", p.position), fields.pop("target"))
-        self._commit(p.with_(**fields), text)
+        return p.with_(**fields)
+
+    def _start_number_drag(self):
+        self.tool.cancel()
+        self._number_drag_base = self.editor.state
+
+    def _preview_number_drag(self, fields, text):
+        p = self._edited_projector(self._number_drag_base, fields)
+        if p is not None:
+            self._number_drag_text = text
+            self.editor.show_preview(p)
+
+    def _finish_number_drag(self, accept):
+        base, new = self._number_drag_base, self.editor.preview
+        self._number_drag_base = None
+        if accept and base is not None and self.editor.state == base and new is not None:
+            self._commit(new, self._number_drag_text)
+        else:
+            self.editor.cancel_preview()
+        self.view.setFocus()
 
     def _commit(self, new, text):
         """Every projector edit from the screen: one undoable step, or the reason it was refused, shown."""

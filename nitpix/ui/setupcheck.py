@@ -505,6 +505,10 @@ def run_layout(app, win, shot: str):
     add(lambda: win.settings_screen.findChild(__import__("PySide6.QtWidgets", fromlist=["QScrollArea"]).QScrollArea)
         .verticalScrollBar().setValue(10 ** 6), 300)
     add(lambda: look("minimum-settings-bottom"), 10)
+    for w, h, tag in ((1400, 860, "normal"), (1040, 640, "minimum")):
+        for view in ("dashboard", "media", "review", "presets", "reports", "settings"):
+            add(lambda w=w, h=h, view=view: (size(w, h), win.show_view(view)), 500)
+            add(lambda view=view, tag=tag: look(f"{tag}-{view}"), 10)
     add(lambda: (size(1400, 860), win.nav["mapping"].click()), 800)
     add(lambda: look("normal-after-resizing"), 10)
 

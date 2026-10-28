@@ -63,6 +63,7 @@ SECTIONS = {
         ("Scroll  pinch", "Zoom"),
         ("F", "Frame the whole stage"),
         ("Space", "Play / pause"),
+        ("Drag a Body / Target value", "Adjust horizontally; Shift for fine, ⌘/Ctrl for coarse; Esc cancels; one Undo per drag"),
         ("← →  ⇧← ⇧→", "Step one frame / one second"),
         ("Home  End", "First / last frame"),
         (f"{MOD}-click  ⇧-click", "Select several objects in the list"),
@@ -72,11 +73,11 @@ SECTIONS = {
     ]),
 }
 EVERYWHERE = ("Everywhere", "", [
-    ("1 – 6", "Dashboard, Media, Review, Specs, Reports, Settings (in Review too)"),
+    ("1 – 7", "Dashboard, Media, Review, Mapping, Specs, Reports, Settings (in Review too)"),
     ("?", "This panel, opened on the screen you are on"),
     ("Drop", "Drop media on the window or the Dock icon; with no project open, one is made for it"),
 ])
-ORDER = ["review", "media", "presets", "dashboard", "reports", "settings"]
+ORDER = ["dashboard", "media", "review", "mapping", "presets", "reports", "settings"]
 
 
 def _rows(entries) -> str:

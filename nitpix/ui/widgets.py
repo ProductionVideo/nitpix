@@ -7,7 +7,22 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QFontMetrics, QPainter
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLayout, QSizePolicy, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLayout, QSizePolicy, QStyle, QStyleOptionComboBox, QStylePainter, QWidget
+
+
+class ElideComboBox(QComboBox):
+    """A shrinking media selector: keep both ends of a long filename visible."""
+    def paintEvent(self, ev):
+        if self.isEditable():
+            return super().paintEvent(ev)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        room = self.style().subControlRect(QStyle.ComplexControl.CC_ComboBox, option,
+                                           QStyle.SubControl.SC_ComboBoxEditField, self).width()
+        option.currentText = self.fontMetrics().elidedText(option.currentText, Qt.TextElideMode.ElideMiddle, max(0, room - 8))
+        painter = QStylePainter(self)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
 
 
 class ElideLabel(QLabel):

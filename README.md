@@ -77,7 +77,7 @@ What an experimental build keeps separate:
 
 ### Mapping
 
-Mapping shows a project's media on an imported stage model while it plays, so you can check how content lands on screens. Open a project and choose **Mapping** in the sidebar, between Review and Specs. It has no number key: 1–6 still go to Dashboard, Media, Review, Specs, Reports and Settings.
+Mapping shows a project's media on an imported stage model while it plays, so you can check how content lands on screens. Open a project and choose **Mapping** in the sidebar, between Review and Specs. Number keys follow the sidebar: 1 Dashboard, 2 Media, 3 Review, 4 Mapping, 5 Specs, 6 Reports, 7 Settings.
 
 To use it:
 

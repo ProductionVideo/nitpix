@@ -31,7 +31,7 @@ from .shortcuts import ShortcutsDialog
 from .review import ReviewScreen, btn, chip
 from .widgets import ElideLabel, nav_icon, tidy_combo
 
-VIEWS = ["dashboard", "media", "review", "presets", "reports", "settings"]   # number keys 1-6, as before Mapping
+VIEWS = ["dashboard", "media", "review", "mapping", "presets", "reports", "settings"]   # number keys match the sidebar
 NAV = ["dashboard", "media", "review", "mapping", "presets", "reports", "settings"]   # the sidebar, top to bottom
 VIEW_LABEL = {"dashboard": "Dashboard", "media": "Media", "review": "Review", "presets": "Specs", "reports": "Reports",
               "settings": "Settings", "mapping": "Mapping"}
@@ -618,8 +618,7 @@ class MainWindow(QMainWindow):
             b.setIconSize(QSize(18, 18))
             b.setProperty("nav", True)
             b.setCheckable(True)
-            b.setToolTip(f"{VIEW_LABEL[v]} ({VIEWS.index(v) + 1})" if v in VIEWS else    # Mapping has no number key
-                         "Mapping: the project's media on an imported stage")
+            b.setToolTip(f"{VIEW_LABEL[v]} ({VIEWS.index(v) + 1})")
             b.clicked.connect(lambda _, v=v: self.show_view(v))
             rl.addWidget(b)
             self.nav[v] = b

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout
 
 from ..projector import FITS, MAX_RASTER, MAX_THROW, MIN_RASTER, MIN_THROW, RASTERS
 from . import theme
+from .dragspin import DragDoubleSpinBox
 from .review import btn
 from .widgets import ElideLabel
 
@@ -36,7 +37,7 @@ def _commit_keys(box, ev) -> bool:
     return False
 
 
-class _Spin(QDoubleSpinBox):
+class _Spin(DragDoubleSpinBox):
     """A number committed on Enter / leaving / stepping. Enter and Escape give the keys back."""
     done = Signal()
 
@@ -93,6 +94,9 @@ class ProjectorPanel(QWidget):
     look_requested = Signal(bool)
     undo_requested = Signal()
     redo_requested = Signal()
+    scrub_started = Signal()
+    scrub_preview = Signal(dict, str)
+    scrub_finished = Signal(bool)
     changed = Signal(dict, str)                      # fields of the Projector to replace, what the edit is called
     keep_aim_changed = Signal(bool)
     grid_changed = Signal(bool)
@@ -179,7 +183,12 @@ class ProjectorPanel(QWidget):
             lab.setToolTip(tip)
             grid.addWidget(lab, row + 1, 0)
             for c, s in enumerate(spins):
-                s.setToolTip(tip)
+                s.setToolTip(tip + " Drag left/right to adjust; click to type. Shift: fine, ⌘/Ctrl: coarse. Esc cancels a drag.")
+                s.enable_dragging()
+                s.drag_started.connect(self.scrub_started.emit)
+                s.dragged.connect(lambda _v, f=field, ss=spins, a="XYZ"[c]: self.scrub_preview.emit(
+                    {f: tuple(x.value() for x in ss)}, f"Move {a}" if f == "position" else f"Target {a}"))
+                s.drag_finished.connect(self.scrub_finished.emit)
                 s.valueChanged.connect(lambda _v, f=field, ss=spins, a="XYZ"[c]: self.changed.emit(
                     {f: tuple(x.value() for x in ss)}, f"Move {a}" if f == "position" else f"Target {a}"))
                 s.done.connect(self.done_editing.emit)

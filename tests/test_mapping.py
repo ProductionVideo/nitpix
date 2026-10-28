@@ -844,6 +844,72 @@ class ProjectorsTab(_Screen):
         self.assertLess(ms.view.dist, 5)
 
 
+    def test_header_actions_stay_put_for_every_save_state(self):
+        ms = self.ms
+        ms.resize(1040, 640)
+        positions = []
+        for state in ("saved", "pending", "error", "off", "saved"):
+            ms._on_save_state(state, "Temporary test failure")
+            pump(self.app, timeout=0.02)
+            positions.append((ms.add_btn.geometry(), ms.replace_btn.geometry()))
+            self.assertLessEqual(ms.retry_btn.geometry().right(), ms.width())
+        self.assertTrue(all(p == positions[0] for p in positions))
+        reset = ms.reset_view_btn
+        self.assertGreaterEqual(reset.parentWidget().width() - reset.geometry().right(), 12)
+
+    def test_number_drag_previews_commits_once_and_escape_cancels(self):
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtTest import QTest
+        from nitpix import mapsave
+        ms = self.ms
+        ms.activate()
+        self.import_(os.path.join(FIX, "projector", "projection.obj"))
+        ms.tabs.setCurrentIndex(1)
+        ms.add_projector()
+        ms.edit_projector({"position": (0., 2., 10.), "target": (0., 2., 0.)}, "Place")
+        ms.flush()
+        saved = lambda: mapsave.projector_from(self.session.project.get_meta(mapsave.KEY)["projectors"][0])
+
+        def press(spin):
+            line = spin.lineEdit()
+            start = line.rect().center()
+            QTest.mousePress(line, Qt.MouseButton.LeftButton, pos=start)
+            return line, start
+
+        def move(line, start, dx, mods=Qt.KeyboardModifier.NoModifier):
+            pos = start + type(start)(dx, 0)
+            ev = QMouseEvent(QEvent.Type.MouseMove, QPointF(pos), QPointF(line.mapToGlobal(pos)),
+                             Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, mods)
+            self.app.sendEvent(line, ev)
+
+        before, index = ms.projector, ms.editor.stack.index()
+        line, start = press(ms.proj_panel.pos[0])
+        move(line, start, 20)
+        self.assertGreater(ms.editor.shown.position[0], before.position[0])
+        self.assertEqual(ms.projector, before)
+        ms.saver.changed()
+        ms.flush()
+        self.assertEqual(saved(), before)
+        move(line, start, 40)
+        QTest.mouseRelease(line, Qt.MouseButton.LeftButton, pos=start)
+        self.assertEqual(ms.editor.stack.index(), index + 1)
+        self.assertAlmostEqual(ms.projector.position[0], before.position[0] + .4)
+        self.assertEqual(ms.projector.target[0], ms.projector.position[0])
+        ms.undo()
+        self.assertEqual(ms.projector, before)
+
+        index = ms.editor.stack.index()
+        line, start = press(ms.proj_panel.tgt[0])
+        move(line, start, 20, Qt.KeyboardModifier.ShiftModifier)
+        self.assertAlmostEqual(ms.editor.shown.target[0], before.target[0] + .02)
+        QTest.keyClick(line, Qt.Key.Key_Escape)
+        QTest.mouseRelease(line, Qt.MouseButton.LeftButton, pos=start)
+        self.assertIsNone(ms.editor.preview)
+        self.assertEqual((ms.projector, ms.editor.stack.index()), (before, index))
+        self.assertEqual(ms.proj_panel.tgt[0].value(), before.target[0])
+
+
 @unittest.skipUnless(HAS, "needs PySide6 and assimp-py")
 class OneSession(unittest.TestCase):
     """MainWindow (release build unless stated): Mapping in the sidebar; one player has a file at a time; switching keeps frames."""
@@ -910,13 +976,15 @@ class OneSession(unittest.TestCase):
         self.assertEqual(w.current_view, "mapping")
         self.assertTrue(w.nav["mapping"].isChecked())
         self.assertIsNotNone(w.mapping)
-        self.assertEqual(VIEWS, ["dashboard", "media", "review", "presets", "reports", "settings"])   # number keys unchanged
-        self.assertEqual(w.nav["presets"].toolTip(), "Specs (4)")
-        self.assertNotRegex(w.nav["mapping"].toolTip(), r"\(\d\)")
+        self.assertEqual(VIEWS, ["dashboard", "media", "review", "mapping", "presets", "reports", "settings"])
+        self.assertEqual(w.nav["presets"].toolTip(), "Specs (5)")
+        self.assertEqual(w.nav["mapping"].toolTip(), "Mapping (4)")
         self.assertEqual(SECTIONS["mapping"][0], "Mapping")
         w.dashboard.setFocus()
-        QTest.keyClick(w.dashboard, Qt.Key.Key_4)
-        self.assertEqual(w.current_view, "presets")
+        for key, view in ((Qt.Key.Key_4, "mapping"), (Qt.Key.Key_5, "presets"),
+                          (Qt.Key.Key_6, "reports"), (Qt.Key.Key_7, "settings")):
+            QTest.keyClick(w.dashboard, key)
+            self.assertEqual(w.current_view, view)
         w.set_rail_collapsed(True)                                           # icon strip: same order, icon only
         self.assertEqual((w.nav["mapping"].text(), w.nav["mapping"].icon().isNull()), ("", False))
         w.set_rail_collapsed(False)
