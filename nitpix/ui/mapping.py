@@ -1524,7 +1524,7 @@ class MappingScreen(QWidget):
 
     def _preview_number_drag(self, fields, text):
         p = self._edited_projector(self._number_drag_base, fields)
-        if p is not None:
+        if p is not None and not p.problem():                  # Body = Target: keep showing the last valid pose
             self._number_drag_text = text
             self.editor.show_preview(p)
 
@@ -1535,6 +1535,7 @@ class MappingScreen(QWidget):
             self._commit(new, self._number_drag_text)
         else:
             self.editor.cancel_preview()
+            self._projector_changed()                          # the numbers go back even if nothing was previewed
         self.view.setFocus()
 
     def _commit(self, new, text):

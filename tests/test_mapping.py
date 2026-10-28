@@ -903,11 +903,20 @@ class ProjectorsTab(_Screen):
         line, start = press(ms.proj_panel.tgt[0])
         move(line, start, 20, Qt.KeyboardModifier.ShiftModifier)
         self.assertAlmostEqual(ms.editor.shown.target[0], before.target[0] + .02)
-        QTest.keyClick(line, Qt.Key.Key_Escape)
+        self.assertIs(self.app.focusWidget(), ms.proj_panel.tgt[0])     # keys go to the spin box, not its text field
+        QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Escape)
         QTest.mouseRelease(line, Qt.MouseButton.LeftButton, pos=start)
         self.assertIsNone(ms.editor.preview)
         self.assertEqual((ms.projector, ms.editor.stack.index()), (before, index))
         self.assertEqual(ms.proj_panel.tgt[0].value(), before.target[0])
+
+        line, start = press(ms.proj_panel.tgt[2])                          # through Body = Target: never previewed
+        ms._preview_number_drag({"target": before.position}, "Target Z")
+        self.assertIsNone(ms.editor.preview)
+        QTest.keyClick(ms.proj_panel.tgt[2], Qt.Key.Key_Escape)
+        QTest.mouseRelease(line, Qt.MouseButton.LeftButton, pos=start)
+        self.assertEqual((ms.projector, ms.editor.stack.index()), (before, index))
+        self.assertEqual(ms.proj_panel.tgt[2].value(), before.target[2])
 
 
 @unittest.skipUnless(HAS, "needs PySide6 and assimp-py")

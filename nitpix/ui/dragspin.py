@@ -14,9 +14,14 @@ class DragDoubleSpinBox(QDoubleSpinBox):
         self._press_x = None
         self._dragging = False
         self.lineEdit().installEventFilter(self)
+        self.installEventFilter(self)                    # keys arrive at the spin box (the text field's focus proxy)
         self.lineEdit().setCursor(Qt.CursorShape.SizeHorCursor)
 
     def eventFilter(self, obj, ev):
+        if obj is self and hasattr(self, "_dragging") and self._dragging and ev.type() == QEvent.Type.KeyPress \
+                and ev.key() == Qt.Key.Key_Escape:
+            self._finish_drag(False)
+            return True
         if obj is self.lineEdit() and hasattr(self, "_dragging"):
             kind = ev.type()
             if kind == QEvent.Type.MouseButtonPress and ev.button() == Qt.MouseButton.LeftButton:
