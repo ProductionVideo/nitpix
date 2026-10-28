@@ -1,6 +1,7 @@
 """Main window: rail navigation, the screens, scan jobs and the project lifecycle."""
 from __future__ import annotations
 
+import json
 import os
 import platform
 import subprocess
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
                                QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTableView, QTextEdit, QVBoxLayout,
                                QWidget, QAbstractItemView)
 
-from .. import __version__, demo, libmpv, reports, service, updates, variant
+from .. import __version__, defaults, demo, libmpv, reports, service, updates, variant
 from ..probe import tool_versions
 from ..store import recent_projects
 from . import deps, display, theme
@@ -67,6 +68,18 @@ def fmt_bytes(n):
 
 
 TEXT_WIDGETS = (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox)
+
+
+DEFAULTS_KEY = "defaults/new_project"           # personal defaults for new projects (nitpix/defaults.py)
+
+
+def remembered_defaults() -> dict | None:
+    """What new projects start with, if the user chose; None: the factory settings."""
+    raw = prefs().value(DEFAULTS_KEY, "")
+    try:
+        return json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return {"version": None}                 # damaged: reported when used, never silently replaced
 
 
 def text_focused(w=None) -> bool:
@@ -460,6 +473,23 @@ class SettingsScreen(QWidget):
         row.addWidget(btn("Save settings", "", self.save, primary=True))
         row.addStretch(1)
         form.addRow(row)
+        form.addRow(QLabel("<b>New projects</b>"))
+        self.defaults_lab = QLabel()
+        self.defaults_lab.setWordWrap(True)
+        self.defaults_lab.setProperty("muted", True)
+        form.addRow(self.defaults_lab)
+        drow = QHBoxLayout()
+        self.defaults_btn = btn("Use these for new projects",
+                                "Saves this project's settings, then remembers the reviewer name, delivery spec (its whole "
+                                "definition), analysis and IINA choices for projects you create from now on. Project name, "
+                                "client and everything recorded in a project are not included; existing projects are unchanged.",
+                                self.remember_defaults)
+        drow.addWidget(self.defaults_btn)
+        self.forget_btn = btn("Use factory settings", "New projects start with nitpix's factory settings again. "
+                              "No project is changed.", self.forget_defaults, ghost=True)
+        drow.addWidget(self.forget_btn)
+        drow.addStretch(1)
+        form.addRow(drow)
         scroll.setWidget(box)
         outer.addWidget(scroll, 1)
 
@@ -492,6 +522,28 @@ class SettingsScreen(QWidget):
         self.auto_updates.blockSignals(True)
         self.auto_updates.setChecked(not variant.IS_EXPERIMENTAL and prefs().value("updates/auto", True, type=bool))
         self.auto_updates.blockSignals(False)
+        self.show_defaults()
+
+    def show_defaults(self):
+        d = remembered_defaults()
+        self.defaults_lab.setText(defaults.describe(d))
+        self.forget_btn.setEnabled(d is not None)
+
+    def remember_defaults(self):
+        """Explicit only: never inferred from opening someone's project."""
+        self.save()
+        try:
+            d = defaults.capture(self.win.session.project)
+        except defaults.DefaultsError as e:
+            return self.win.toast(f"Defaults not changed: {e}", True)
+        prefs().setValue(DEFAULTS_KEY, json.dumps(d))
+        self.show_defaults()
+        self.win.toast("New projects will start with these settings")
+
+    def forget_defaults(self):
+        prefs().remove(DEFAULTS_KEY)
+        self.show_defaults()
+        self.win.toast("New projects will start with nitpix's factory settings")
 
     def save(self):
         p = self.win.session.project
@@ -679,10 +731,12 @@ class MainWindow(QMainWindow):
         if self.session.project is not None and not self.mapping_released("Opening another project"):
             return False
         try:
-            self.session.open(path, name)
+            self.session.open(path, name, defaults=remembered_defaults())
         except Exception as e:
             self.toast(str(e), True)
             return False
+        for problem in self.session.seed_problems:
+            self.toast(problem, True)
         self._reset_mapping()
         self.review.asset = None
         self.review.released = False

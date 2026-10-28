@@ -172,7 +172,8 @@ class Project:
         if "ext_id" not in {r[1] for r in self.conn.execute("PRAGMA table_info(notes)")}:
             self.conn.execute("ALTER TABLE notes ADD COLUMN ext_id TEXT")  # IINfo marker id
         self.conn.commit()
-        if self.get_meta("settings") is None:
+        self.created = self.get_meta("settings") is None      # made just now, not opened (nitpix/defaults.py seeds it)
+        if self.created:
             self.set_meta("settings", DEFAULT_SETTINGS)
             self.set_meta("created", time.time())
 

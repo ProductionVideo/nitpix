@@ -11,6 +11,7 @@ import re
 import threading
 import time
 
+from . import defaults as defaults_mod
 from . import vocab
 from .iina import IINABridge
 from .presets import builtin_by_id
@@ -229,8 +230,11 @@ class Session:
         self.jobs: JobManager | None = None
         self.iina: IINABridge | None = None
         self.lock = threading.Lock()
+        self.seed_problems: list[str] = []
 
-    def open(self, folder: str, name: str | None = None) -> Project:
+    def open(self, folder: str, name: str | None = None, defaults: dict | None = None) -> Project:
+        """Open (or create) a project. `defaults` (nitpix/defaults.py) seed a project created now, once;
+        an existing project is never changed by them. What could not be used is in self.seed_problems."""
         folder = os.path.expanduser(folder)
         if not folder.endswith((".nitpix", ".lhsqc")):  # .lhsqc: projects from before the rename
             folder += ".nitpix"
@@ -239,6 +243,7 @@ class Session:
                 raise RuntimeError("Finish or cancel the running batch before switching projects.")
             self._close_locked()
             p = Project(folder)
+            self.seed_problems = defaults_mod.seed(p, defaults) if (p.created and defaults) else []
             if name:
                 p.update_settings({"project_name": name})
             self.project = p

@@ -253,5 +253,139 @@ def wait(s, timeout=60):
     assert not s.jobs.active, "job did not finish"
 
 
+class PersonalDefaults(unittest.TestCase):
+    """Defaults for new projects (nitpix/defaults.py): remembered only when asked, copied into a new
+    project once, never into one that is opened; a custom spec travels as its whole definition."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="nitpix defaults ")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sessions = []
+        self.factory = copy.deepcopy(builtin_by_id()[SRC])
+
+    def tearDown(self):
+        for s in self.sessions:
+            s.close()
+
+    def session(self, name, defaults=None):
+        s = service.Session()
+        self.sessions.append(s)
+        s.open(os.path.join(self.tmp, name), defaults=defaults)
+        return s, s.project
+
+    def test_remembered_once_then_each_project_keeps_its_own(self):
+        from nitpix import defaults
+        old_s, old = self.session("old.nitpix")                             # an older project, set up differently
+        service.update_settings(old, {"reviewer": "Old Hand", "preset_id": "none", "client": "Old client",
+                                      "analysis": {"loudness": True, "workers": 3}})
+        before_old = old.settings
+        a_s, a = self.session("a.nitpix")
+        body = {k: copy.deepcopy(v) for k, v in self.factory.items() if k in ("name", "description", "video", "audio", "sequence", "still")}
+        body["name"], body["video"]["width"] = "House 4K", 3840
+        pid, _w = service.save_preset(a, body)
+        service.update_settings(a, {"reviewer": "Ann", "client": "Client A", "project_name": "Show A", "preset_id": pid,
+                                    "analysis": {"loudness": False, "workers": 4}, "iina": {"socket_mode": "fixed"}})
+        aid = a.upsert_asset("/m/a.mov", kind="video", name="a.mov", fps="25/1", frames=10, duration=0.4, scan_state="done")
+        service.add_note(a, aid, text="checked")
+        service.signoff(a, "approved")
+        d = json.loads(json.dumps(defaults.capture(a)))                      # as the preferences keep it
+
+        b_s, b = self.session("b.nitpix", defaults=d)                         # created now: seeded
+        sb = b.settings
+        self.assertEqual((sb["reviewer"], sb["preset_id"], sb["analysis"]["loudness"], sb["analysis"]["workers"],
+                          sb["iina"]["socket_mode"]), ("Ann", pid, False, 4, "fixed"))
+        self.assertEqual((sb["client"], sb["project_name"]), ("", "Untitled delivery"))      # project data stays in its project
+        self.assertIsNone(b.get_meta("signoff"))
+        self.assertEqual(b.q("SELECT * FROM notes"), [])
+        row = lambda p: json.loads(p.q1("SELECT spec FROM presets WHERE id=?", (pid,))["spec"])
+        self.assertEqual(row(b), row(a))                                     # the whole definition, in B's own table
+        self.assertEqual(row(b)["video"]["width"], 3840)
+        self.assertEqual(b_s.seed_problems, [])
+        body["video"]["width"] = 1920                                        # editing B's copy changes nothing else
+        service.save_preset(b, {**body, "id": pid})
+        self.assertEqual(row(a)["video"]["width"], 3840)
+        self.assertEqual(d["preset"]["spec"]["video"]["width"], 3840)
+
+        old_s.close()                                                        # reopened with defaults: unchanged
+        old_s.open(os.path.join(self.tmp, "old.nitpix"), defaults=d)
+        self.assertEqual(old_s.project.settings, before_old)
+        a_s.close()
+        a_s.open(os.path.join(self.tmp, "a.nitpix"), defaults={**d, "reviewer": "Ben"})
+        a = a_s.project
+        self.assertEqual(a.settings["reviewer"], "Ann")
+        self.assertEqual([n["author"] for n in a.q("SELECT author FROM notes")], ["Ann"])   # history keeps its authors
+        self.assertEqual(a.get_meta("signoff")["by"], "Ann")
+        _c_s, c = self.session("c.nitpix", defaults={**d, "reviewer": "Ben"})
+        self.assertEqual(c.settings["reviewer"], "Ben")
+        _n_s, n = self.session("n.nitpix")                                   # no defaults chosen: the factory settings
+        self.assertEqual(n.settings["preset_id"], SRC)
+        self.assertEqual(n.settings["reviewer"], "")
+
+    def test_a_default_spec_that_cannot_be_used_is_said_not_swapped(self):
+        from nitpix import defaults
+        _s, a = self.session("a.nitpix")
+        d = defaults.capture(a)
+        for name, spec in (("unknown built-in", {"id": "gone_spec", "builtin": True, "name": "Gone"}),
+                           ("invalid custom", {"id": "custom_x", "builtin": False, "name": "Broken", "spec": {"video": {"width": "wide"}}}),
+                           ("no definition", {"id": "custom_y", "builtin": False, "name": "Empty"})):
+            with self.subTest(name):
+                s, p = self.session(f"{name}.nitpix", defaults={**d, "preset": spec, "reviewer": "Ann"})
+                self.assertEqual(p.settings["preset_id"], SRC)               # the factory default, and said so
+                self.assertEqual(len(s.seed_problems), 1)
+                self.assertIn(spec["name"], s.seed_problems[0])
+                self.assertEqual(p.settings["reviewer"], "Ann")              # the rest still applies
+        s, p = self.session("damaged.nitpix", defaults={"version": None})
+        self.assertIn("not used", s.seed_problems[0])
+        self.assertEqual(p.settings["preset_id"], SRC)
+
+
+@unittest.skipUnless(HAS_QT, "PySide6 not installed in this interpreter")
+class DefaultsInTheApp(unittest.TestCase):
+    """Settings → Use these for new projects, kept in the app's own (variant) preferences across a restart."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        cls.settings_dir = tempfile.mkdtemp(prefix="nitpix settings ")
+        QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, cls.settings_dir)
+
+    def test_use_these_for_new_projects_survives_a_restart(self):
+        from nitpix import variant
+        from nitpix.ui.app import DEFAULTS_KEY, MainWindow
+        from nitpix.ui.prefs import prefs
+        tmp = tempfile.mkdtemp(prefix="nitpix defaults ui ")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        prefs().clear()
+        prefs().setValue("updates/auto", False)                             # app preferences that must survive
+        prefs().setValue("window/rail", "narrow")
+        w = MainWindow(service.Session())
+        w.open_project(os.path.join(tmp, "a.nitpix"))
+        self.assertIsNone(prefs().value(DEFAULTS_KEY))                       # opening or creating infers nothing
+        w.show_view("settings")
+        st = w.settings_screen
+        st.reviewer.setText("Ann")
+        st.client.setText("Client A")
+        st.loudness.setChecked(False)
+        st.defaults_btn.click()
+        self.assertIn("Ann", st.defaults_lab.text())
+        w.close()
+        w.deleteLater()
+        w2 = MainWindow(service.Session())                                   # "restart"
+        self.addCleanup(lambda: (w2.close(), w2.deleteLater()))
+        w2.open_project(os.path.join(tmp, "b.nitpix"))
+        s = w2.session.project.settings
+        self.assertEqual((s["reviewer"], s["client"], s["analysis"]["loudness"]), ("Ann", "", False))
+        self.assertEqual((prefs().value("updates/auto", type=bool), prefs().value("window/rail")), (False, "narrow"))
+        with mock.patch.object(variant, "SETTINGS", ("nitpix-exp", "nitpix-exp")):
+            self.assertIsNone(prefs().value(DEFAULTS_KEY))                   # an experimental build keeps its own
+        w2.show_view("settings")
+        w2.settings_screen.forget_btn.click()
+        w2.open_project(os.path.join(tmp, "c.nitpix"))
+        self.assertEqual(w2.session.project.settings["reviewer"], "")
+
+
 if __name__ == "__main__":
     unittest.main()
