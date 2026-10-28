@@ -320,6 +320,32 @@ class Screens(unittest.TestCase):
         self.assertEqual(q.settings["reviewer"], "Draft reviewer")
         self.assertIn("Draft spec", [x["name"] for x in service.presets(q)["presets"]])
 
+    def test_unfinished_checks_never_read_as_clean(self):
+        from PySide6.QtWidgets import QLabel
+        p, w = self.win.session.project, self.win
+        cid = p.upsert_asset("/m/c.mov", kind="video", name="c.mov", fps="25/1", frames=10, duration=0.4, scan_state="pending")
+        text = lambda: " ".join(l.text() for l in w.review.checks_scroll.widget().findChildren(QLabel))
+        for state, says in (("pending", "Not checked yet"), ("analysing", "Checking now"),
+                            ("error", "did not finish"), ("done", "No automated checks apply")):
+            p.x("UPDATE assets SET scan_state=? WHERE id=?", (state, cid))
+            w.show_asset(cid)
+            self.assertIn(says, text())
+            self.assertNotIn("No problems found", text())
+        w.show_asset(self.bid)                                                   # checked, nothing found: clean
+        p.replace_findings(self.bid, [{"check_key": "video.codec", "category": "format", "kind": "measured", "auto_result": "pass",
+                                       "confidence": "high", "title": "Video codec", "detail": "", "measured": "prores",
+                                       "expected": "prores", "why": "", "frame_in": None, "frame_out": None}])
+        w.show_asset(self.aid)
+        w.show_asset(self.bid)
+        self.assertIn("No problems found", text())
+        p.x("UPDATE assets SET scan_state='pending' WHERE id=?", (cid,))
+        w.show_view("dashboard")
+        self.assertTrue(w.dashboard.unchecked.isVisibleTo(w.dashboard))
+        self.assertIn("1 of 3 assets not checked yet (1 waiting)", w.dashboard.unchecked.text())
+        p.x("UPDATE assets SET scan_state='done' WHERE id=?", (cid,))
+        w.show_view("dashboard")
+        self.assertFalse(w.dashboard.unchecked.isVisibleTo(w.dashboard))
+
     def test_review_screen_stays_narrow(self):
         # a very long name and path must elide, not force the window wider than a laptop screen
         p = self.win.session.project

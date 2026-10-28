@@ -77,6 +77,19 @@ class PosCtx:
             return None
 
 
+
+def checks_state_text(scan_state: str, any_findings: bool) -> str:
+    """What the Checks tab says when nothing needs attention: only a finished scan counts as clean."""
+    if scan_state == "pending":
+        return "Not checked yet: this file is waiting for the automated checks.\nNo result until they have run."
+    if scan_state in ("probing", "analysing"):
+        return "Checking now…\nResults appear here when the automated checks finish."
+    if scan_state == "error":
+        return "The automated checks did not finish, so there is no automated result."
+    if not any_findings:
+        return "No automated checks apply to this file.\nReview visually, then set the review status above."
+    return "No problems found by automated checks.\nReview visually, then set the review status above."
+
 def chip(text: str, result: str) -> QLabel:
     lab = QLabel(text)
     lab.setStyleSheet(theme.chip_style(result))
@@ -718,11 +731,14 @@ class ReviewScreen(QWidget):
             lay.addLayout(hdr)
             for f in det:
                 lay.addWidget(FindingRow(f, self.ctx, self))
-        if not det and not prob and a["scan_state"] != "error":
-            ok = QLabel("No problems found by automated checks.\nReview visually, then set the review status above.")
-            ok.setProperty("muted", True)
-            ok.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lay.addWidget(ok)
+        if not det and not prob:
+            text = checks_state_text(a["scan_state"], bool(vis))
+            if text:
+                ok = QLabel(text)
+                ok.setProperty("muted", True)
+                ok.setWordWrap(True)
+                ok.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                lay.addWidget(ok)
         tog = QToolButton()
         tog.setText(f"{len(rest)} passed / informational checks")
         tog.setCheckable(True)
@@ -743,6 +759,7 @@ class ReviewScreen(QWidget):
             rl.addLayout(row)
         restbox.setVisible(False)
         tog.toggled.connect(lambda on: (restbox.setVisible(on), tog.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)))
+        tog.setVisible(bool(rest))
         lay.addWidget(tog)
         lay.addWidget(restbox)
         lay.addStretch(1)

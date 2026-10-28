@@ -244,6 +244,10 @@ class DashboardScreen(QWidget):
         self.sub.setProperty("muted", True)
         lay.addWidget(self.title)
         lay.addWidget(self.sub)
+        self.unchecked = QLabel()                  # a batch still being checked must not read as clean
+        self.unchecked.setProperty("banner", True)
+        self.unchecked.setWordWrap(True)
+        lay.addWidget(self.unchecked)
         self.kpis = QGridLayout()
         lay.addLayout(self.kpis)
         lay.addWidget(QLabel("<b>Needs attention</b>"))
@@ -298,8 +302,17 @@ class DashboardScreen(QWidget):
             cl.addWidget(l3)
             self.kpis.addWidget(card, i // 3, i % 3)
         self.model.set_rows(d["needs_attention"])
+        st = d["by_state"]
+        waiting, checking = st.get("pending", 0), st.get("probing", 0) + st.get("analysing", 0)
+        if waiting + checking:
+            parts = [f"{checking} being checked" if checking else "", f"{waiting} waiting" if waiting else ""]
+            self.unchecked.setText(f"{waiting + checking} of {d['assets']['n']} assets not checked yet "
+                                   f"({', '.join(x for x in parts if x)}). Fail, Warning and Pass count checked assets only.")
+        self.unchecked.setVisible(bool(waiting + checking))
         top = ", ".join(f"{t['check_key']} ({t['n']} on {t['assets']} assets)" for t in d["top_issues"][:6])
-        self.issues.setText(("Most common problems: " + top) if top else "No problems recorded yet.")
+        self.issues.setText(("Most common problems: " + top) if top else
+                            "No problems recorded yet: some assets are still to be checked." if waiting + checking else
+                            "No problems recorded yet.")
 
 
 class ReportsScreen(QWidget):
